@@ -1,0 +1,41 @@
+From 923a1fbc2b2a6467f878011d8e8a4cd6911cb8ca Mon Sep 17 00:00:00 2001
+From: Risto Kuitunen <quic_rkuitune@quicinc.com>
+Date: Tue, 13 Dec 2022 14:08:04 +0100
+Subject: [PATCH] MPlane-required changes.
+
+Add LYD_OPT_TRUSTED flag to validate the notification.
+Add method to get sr session context from wrapped session.
+---
+ bindings/cpp/src/Session.hpp | 2 +-
+ src/modinfo.c                | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/bindings/cpp/src/Session.hpp b/bindings/cpp/src/Session.hpp
+index 1aacc517..53d158c1 100644
+--- a/bindings/cpp/src/Session.hpp
++++ b/bindings/cpp/src/Session.hpp
+@@ -142,7 +142,7 @@ public:
+     void event_notif_send(libyang::S_Data_Node notif);
+ 
+     friend class Subscribe;
+-
++    sr_session_ctx_t *get_sr_session() { return _sess; }
+ private:
+     sr_session_ctx_t *_sess;
+     S_Connection _conn;
+diff --git a/src/modinfo.c b/src/modinfo.c
+index f03cda47..35ab0646 100644
+--- a/src/modinfo.c
++++ b/src/modinfo.c
+@@ -2159,7 +2159,7 @@ sr_modinfo_op_validate(struct sr_mod_info_s *mod_info, struct lyd_node *op, int
+     }
+ 
+     /* validate */
+-    flags = ((op->schema->nodetype & (LYS_RPC | LYS_ACTION)) ? (output ? LYD_OPT_RPCREPLY : LYD_OPT_RPC) : LYD_OPT_NOTIF);
++    flags = ((op->schema->nodetype & (LYS_RPC | LYS_ACTION)) ? (output ? LYD_OPT_RPCREPLY : LYD_OPT_RPC) : LYD_OPT_NOTIF | LYD_OPT_TRUSTED);
+     if (lyd_validate(&top_op, flags, mod_info->data)) {
+         sr_errinfo_new_ly(&err_info, mod_info->conn->ly_ctx);
+         sr_errinfo_new(&err_info, SR_ERR_VALIDATION_FAILED, NULL, "%s %svalidation failed.",
+-- 
+2.17.1
+

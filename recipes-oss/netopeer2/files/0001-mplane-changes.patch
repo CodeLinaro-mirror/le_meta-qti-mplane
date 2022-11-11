@@ -1,0 +1,455 @@
+From efb0eb26f5050ab0b08cb0b8bce29f69a8c4d8d1 Mon Sep 17 00:00:00 2001
+From: Risto Kuitunen <quic_rkuitune@quicinc.com>
+Date: Tue, 13 Dec 2022 13:50:03 +0100
+Subject: [PATCH] Send o-ran-operations:reset when max call home attempts have
+ been made
+
+Add diag logging.
+
+Init and deinit diag.
+
+Add prefix NP2 to diag logs. Only use diag if DIAG_LOGGING flag is set.
+
+Link with diag-library if it is found. Use different logging levels based on priority.
+
+Remove extra linking of diag library.
+
+Diag should only be linked if the diag library is found.
+---
+ CMakeLists.txt                 | 17 +++++++
+ CMakeModules/FindSysrepo.cmake | 12 ++++-
+ src/log.c                      | 77 ++++++++++++++++++++++++++++++
+ src/log.h                      |  6 +++
+ src/main.c                     | 48 ++++++++++++++++---
+ src/netconf.c                  |  2 +-
+ src/netconf_server.c           | 85 +++++++++++++++++++++++++++++++++-
+ src/netconf_server.h           |  6 +++
+ 8 files changed, 243 insertions(+), 10 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index be6700b..59b5f30 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -275,3 +275,20 @@ add_custom_target(cleancache
+ 
+ # uninstall
+ add_custom_target(uninstall "${CMAKE_COMMAND}" -P "${CMAKE_MODULE_PATH}/uninstall.cmake")
++
++find_library(DIAG_LIBRARY
++    NAMES
++    diag
++	PATHS
++    ${CMAKE_LIBRARY_PATH}
++    ${CMAKE_INSTALL_PREFIX}/lib
++)
++
++if(${DIAG_LIBRARY} STREQUAL DIAG_LIBRARY-NOTFOUND)
++  message("Diag not found for project: ${PROJECT_NAME}")
++else()
++  message("Diag found for project: ${PROJECT_NAME}")
++  target_link_libraries(netopeer2-server diag)
++  target_compile_definitions(netopeer2-server PUBLIC DIAG_LOGGING)
++  target_compile_definitions(serverobj PUBLIC DIAG_LOGGING)
++endif()
+diff --git a/CMakeModules/FindSysrepo.cmake b/CMakeModules/FindSysrepo.cmake
+index 8dda6df..65f77e1 100644
+--- a/CMakeModules/FindSysrepo.cmake
++++ b/CMakeModules/FindSysrepo.cmake
+@@ -49,11 +49,19 @@ else()
+         ${CMAKE_LIBRARY_PATH} ${CMAKE_INSTALL_PREFIX}/lib
+     )
+ 
++    find_library(SYSREPO_CPP_LIBRARY
++        NAMES sysrepo-cpp libsysrepo-cpp
++        PATHS /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64 /opt/local/lib /sw/lib
++        ${CMAKE_LIBRARY_PATH} ${CMAKE_INSTALL_PREFIX}/lib
++    )
++
++
+     set(SYSREPO_INCLUDE_DIRS ${SYSREPO_INCLUDE_DIR})
+     set(SYSREPO_LIBRARIES ${SYSREPO_LIBRARY})
+-    mark_as_advanced(SYSREPO_INCLUDE_DIRS SYSREPO_LIBRARIES)
++    set(SYSREPO_CPP_LIBRARIES ${SYSREPO_CPP_LIBRARY})
++    mark_as_advanced(SYSREPO_INCLUDE_DIRS SYSREPO_LIBRARIES SYSREPO_CPP_LIBRARIES)
+ 
+     # handle the QUIETLY and REQUIRED arguments and set SYSREPO_FOUND to TRUE
+     # if all listed variables are TRUE
+-    find_package_handle_standard_args(Sysrepo DEFAULT_MSG SYSREPO_LIBRARY SYSREPO_INCLUDE_DIR)
++    find_package_handle_standard_args(Sysrepo DEFAULT_MSG SYSREPO_LIBRARY SYSREPO_INCLUDE_DIR SYSREPO_CPP_LIBRARY)
+ endif()
+diff --git a/src/log.c b/src/log.c
+index 4260108..81ff715 100644
+--- a/src/log.c
++++ b/src/log.c
+@@ -28,6 +28,11 @@
+ #include "common.h"
+ #include "log.h"
+ 
++#ifdef DIAG_LOGGING
++#include <diag/msg.h>   // for MSG_SPRINTF_1
++#define MSG_SSID_LINUX_DATA   65
++#endif
++
+ volatile uint8_t np2_verbose_level;
+ uint8_t np2_libssh_verbose_level;
+ uint8_t np2_sr_verbose_level;
+@@ -68,6 +73,23 @@ np2log(int priority, const char *src, const char *fmt, ...)
+             break;
+         }
+ 
++#ifdef DIAG_LOGGING
++        switch (priority) {
++        case LOG_ERR:
++            MSG_SPRINTF_1(MSG_SSID_LINUX_DATA, MSG_LEGACY_ERROR, "NP2: %s", format);
++            break;
++        case LOG_WARNING:
++            MSG_SPRINTF_1(MSG_SSID_LINUX_DATA, MSG_LEGACY_HIGH, "NP2: %s", format);
++            break;
++        case LOG_INFO:
++            MSG_SPRINTF_1(MSG_SSID_LINUX_DATA, MSG_LEGACY_MED, "NP2: %s", format);
++            break;
++        default:
++            MSG_SPRINTF_1(MSG_SSID_LINUX_DATA, MSG_LEGACY_LOW, "NP2: %s", format);
++            break;
++        }
++#endif
++
+         va_start(ap, fmt);
+         vfprintf(stderr, format, ap);
+         va_end(ap);
+@@ -236,6 +258,61 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
+     free(buf);
+ }
+ 
++/**
++ * @brief LibSSH logging callback function.
++ *
++ * Map the LibSSH logging level to Netopeer logging level and call the
++ * Netopeer logging function with parameter message.
++ *
++ * @param[in] priority Priority of the log, the smaller being the more important.
++ * @param[in] function The function name calling the the logging fucntions.
++ * @param[in] message  The actual message
++ * @param[in] userdata Userdata to be passed to the callback function.
++ */
++void
++np2log_cb_sh(int priority, const char *function, const char *buffer, void *userdata)
++{
++    (void)function;
++    (void)userdata;
++    int np2_priority = LOG_ERR;
++
++    /* For debug purposes, print the message in yellow to distinquish SSH log
++     * messages from other OSS component log messages. */
++    const char* yellow = "\033[0;33m";
++    const char* reset = "\033[0m";
++
++    /* SSH log levels are:
++     * SSH_LOG_NOLOG - No logging at all
++     * SSH_LOG_WARNING - Only warnings
++     * SSH_LOG_PROTOCOL - High level protocol information
++     * SSH_LOG_PACKET - Lower level protocol infomations, packet level
++     * SSH_LOG_FUNCTIONS -  Every function path
++     */
++
++    if (priority > np2_libssh_verbose_level) {
++        return;
++    }
++
++    switch (priority) {
++    case SSH_LOG_NOLOG:
++        np2_priority = LOG_ERR;
++        break;
++    case SSH_LOG_WARNING:
++        np2_priority = LOG_WARNING;
++        break;
++    case SSH_LOG_PROTOCOL:
++        np2_priority = LOG_INFO;
++        break;
++    case SSH_LOG_PACKET:
++    case SSH_LOG_FUNCTIONS:
++        np2_priority = LOG_DEBUG;
++        break;
++    }
++
++    np2log(np2_priority, "SH", "%s%s%s", yellow, buffer, reset);
++}
++
++
+ /**
+  * @brief Internal printing function, follows the levels from libnetconf2
+  * @param[in] level Verbose level
+diff --git a/src/log.h b/src/log.h
+index 66262e4..b98e337 100644
+--- a/src/log.h
++++ b/src/log.h
+@@ -71,4 +71,10 @@ void np2log_cb_ly(LY_LOG_LEVEL level, const char *msg, const char *path);
+  */
+ void np2log_cb_sr(sr_log_level_t level, const char *msg);
+ 
++/**
++ * @brief printer callback for libshh
++ */
++void
++np2log_cb_sh(int priority, const char *function, const char *buffer, void *userdata);
++
+ #endif /* NP2SRV_LOG_H_ */
+diff --git a/src/main.c b/src/main.c
+index d1abcdb..600fefc 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -39,6 +39,7 @@
+ #endif
+ #ifdef NC_ENABLED_SSH
+ # include "netconf_server_ssh.h"
++#include <libssh/callbacks.h>
+ #endif
+ #ifdef NC_ENABLED_TLS
+ # include "netconf_server_tls.h"
+@@ -47,6 +48,11 @@
+ #include "netconf_monitoring.h"
+ #include "netconf_nmda.h"
+ 
++#ifdef DIAG_LOGGING
++#include <diag/msg.h>	    // For diag data-types
++#include <diag/diag_lsm.h>  // For Diag_LSM_Init()
++#endif
++
+ /** @brief flag for main loop */
+ ATOMIC_T loop_continue = 1;
+ 
+@@ -756,13 +762,13 @@ server_rpc_subscribe(void)
+         EINT;
+         goto error;
+     }
+-    SR_RPC_SUBSCR("/ietf-netconf:get-config", np2srv_rpc_get_cb);
+-    SR_RPC_SUBSCR("/ietf-netconf:edit-config", np2srv_rpc_editconfig_cb);
++    //SR_RPC_SUBSCR("/ietf-netconf:get-config", np2srv_rpc_get_cb);
++    //SR_RPC_SUBSCR("/ietf-netconf:edit-config", np2srv_rpc_editconfig_cb);
+     SR_RPC_SUBSCR("/ietf-netconf:copy-config", np2srv_rpc_copyconfig_cb);
+     SR_RPC_SUBSCR("/ietf-netconf:delete-config", np2srv_rpc_deleteconfig_cb);
+     SR_RPC_SUBSCR("/ietf-netconf:lock", np2srv_rpc_un_lock_cb);
+     SR_RPC_SUBSCR("/ietf-netconf:unlock", np2srv_rpc_un_lock_cb);
+-    SR_RPC_SUBSCR("/ietf-netconf:get", np2srv_rpc_get_cb);
++    //SR_RPC_SUBSCR("/ietf-netconf:get", np2srv_rpc_get_cb);
+     /* keep close-session empty so that internal lnc2 callback is used */
+     SR_RPC_SUBSCR("/ietf-netconf:kill-session", np2srv_rpc_kill_cb);
+     SR_RPC_SUBSCR("/ietf-netconf:commit", np2srv_rpc_commit_cb);
+@@ -934,6 +940,17 @@ server_data_subscribe(void)
+     mod_name = "ietf-truststore";
+     xpath = "/ietf-truststore:truststore/certificates";
+     SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_dummy_cb);
++
++    /*
++     * o-ran-operations: to get re-call-home-no-ssh-timer
++     */
++    mod_name = "o-ran-operations";
++    xpath = "/o-ran-operations:operational-info/re-call-home-no-ssh-timer";
++    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_re_call_home_no_ssh_timer);
++
++    mod_name = "o-ran-operations";
++    xpath = "/o-ran-operations:operational-info/max-call-home-attempts";
++    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_max_call_home_attempts);
+ #endif
+ 
+     /*
+@@ -978,6 +995,9 @@ worker_thread(void *arg)
+ 
+ #ifdef NC_ENABLED_SSH
+     nc_libssh_thread_verbosity(np2_libssh_verbose_level);
++    if(ssh_set_log_callback(np2log_cb_sh)) {
++        ERR("Failed to set LibSSH log callback function.");
++    }
+ #endif
+ 
+     while (ATOMIC_LOAD_RELAXED(loop_continue)) {
+@@ -1120,21 +1140,26 @@ main(int argc, char *argv[])
+             switch (np2_verbose_level) {
+             case NC_VERB_ERROR:
+                 np2_sr_verbose_level = SR_LL_ERR;
+-                np2_libssh_verbose_level = 0;
++                np2_libssh_verbose_level = SSH_LOG_NOLOG;
+                 break;
+             case NC_VERB_WARNING:
+                 np2_sr_verbose_level = SR_LL_WRN;
+-                np2_libssh_verbose_level = 1;
++                np2_libssh_verbose_level = SSH_LOG_WARNING;
+                 break;
+             case NC_VERB_VERBOSE:
+                 np2_sr_verbose_level = SR_LL_INF;
+-                np2_libssh_verbose_level = 1;
++                np2_libssh_verbose_level = SSH_LOG_PROTOCOL;
+                 break;
+             }
+ 
+             nc_verbosity(np2_verbose_level);
+ #ifdef NC_ENABLED_SSH
+             nc_libssh_thread_verbosity(np2_libssh_verbose_level);
++
++            if(ssh_set_log_callback(np2log_cb_sh)) {
++                ERR("Failed to set LibSSH log callback function.");
++                return EXIT_FAILURE;
++            }
+ #endif
+             break;
+         case 'V':
+@@ -1307,6 +1332,12 @@ main(int argc, char *argv[])
+     ly_set_log_clb(np2log_cb_ly, 1); /* libyang */
+     sr_log_set_cb(np2log_cb_sr); /* sysrepo, log level is checked by callback */
+ 
++
++#ifdef DIAG_LOGGING
++    /* Initialize diag logging */
++    Diag_LSM_Init(NULL);
++#endif
++
+     /* initiate NETCONF server */
+     if (server_init()) {
+         ret = EXIT_FAILURE;
+@@ -1379,5 +1410,10 @@ cleanup:
+     /* removes the context and clears all the sessions */
+     sr_disconnect(np2srv.sr_conn);
+ 
++#ifdef DIAG_LOGGING
++    /* Deinit diag-logging */
++    Diag_LSM_DeInit();
++#endif
++
+     return ret;
+ }
+diff --git a/src/netconf.c b/src/netconf.c
+index 0bbe112..7bd3840 100644
+--- a/src/netconf.c
++++ b/src/netconf.c
+@@ -925,7 +925,7 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
+             rc = SR_ERR_OK;
+             LY_TREE_FOR(ly_mod->data, root) {
+                 LY_TREE_DFS_BEGIN(root, next, elem) {
+-                    if (elem->nodetype == LYS_NOTIF) {
++                    if (elem->nodetype == LYS_NOTIF && !lys_is_disabled(elem, 0)) {
+                         /* check that we are not in a grouping */
+                         parent = lys_parent(elem);
+                         while (parent && (parent->nodetype != LYS_GROUPING)) {
+diff --git a/src/netconf_server.c b/src/netconf_server.c
+index 4645f84..0959a06 100644
+--- a/src/netconf_server.c
++++ b/src/netconf_server.c
+@@ -339,6 +339,65 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
+     return SR_ERR_OK;
+ }
+ 
++/* /o-ran-operations:operational-info/re-call-home-no-ssh-timer */
++int
++np2srv_re_call_home_no_ssh_timer(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
++        sr_event_t UNUSED(event), uint32_t UNUSED(request_id), void *UNUSED(private_data))
++{
++    sr_val_t *value = NULL;
++
++    /*1000 is a timeout value (in ms) that will be used in
++    pthread_cond_timedwait(). I used 1000 as this value is used at multiple
++    places, if 0 is pssed the default value 5000 is used.*/
++
++    int rc = sr_get_item(session, xpath, 1000, &value);
++    if (rc != SR_ERR_OK)
++    {
++        return rc;
++    }
++    nc_server_update_re_call_home_no_ssh_timer(value->data.uint16_val);
++
++    return SR_ERR_OK;
++}
++
++void
++call_home_attempts_exceeded_clb(void)
++{
++    sr_val_t *output = NULL;
++    size_t output_count = 0;
++    int rc;
++
++    ERR("call_home_attempts_exceeded_clb called");
++
++    rc = sr_rpc_send(np2srv.sr_sess, "/o-ran-operations:reset", NULL, 0,
++                     np2srv.sr_timeout ? np2srv.sr_timeout + 2000 : 0,
++                     &output, &output_count);
++    if (rc != SR_ERR_OK) {
++        ERR("Failed to send an RPC (%s).", sr_strerror(rc));
++    }
++    else {
++         sr_free_values(output, output_count);
++    }
++}
++
++int
++np2srv_max_call_home_attempts(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
++        sr_event_t UNUSED(event), uint32_t UNUSED(request_id), void *UNUSED(private_data))
++{
++    sr_val_t *value = NULL;
++
++    int rc = sr_get_item(session, xpath, 1000, &value);
++    if (rc != SR_ERR_OK)
++    {
++        return rc;
++    }
++    nc_server_update_max_call_home_attempts(value->data.uint8_val,
++                                            call_home_attempts_exceeded_clb);
++
++    return SR_ERR_OK;
++}
++
++
+ /* /ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ * /tcp-client-parameters */
+ int
+ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
+@@ -382,7 +441,31 @@ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUS
+                     return SR_ERR_INTERNAL;
+                 }
+             }
+-        } else if (!strcmp(node->schema->name, "keepalives")) {
++        } else if (!strcmp(node->schema->name, "local-address")) {
++            if ((op == SR_OP_CREATED) || (op == SR_OP_MODIFIED)) {
++                if (nc_server_ch_client_endpt_set_local_address(client_name, endpt_name, ((struct lyd_node_leaf_list *)node)->value_str)) {
++                    sr_free_change_iter(iter);
++                    return SR_ERR_INTERNAL;
++                }
++            } else if (op == SR_OP_DELETED) {
++                if (nc_server_ch_client_endpt_reset_local_address(client_name, endpt_name)) {
++                    sr_free_change_iter(iter);
++                    return SR_ERR_INTERNAL;
++                }
++            }
++        } else if (!strcmp(node->schema->name, "local-port")) {
++            if ((op == SR_OP_CREATED) || (op == SR_OP_MODIFIED)) {
++                if (nc_server_ch_client_endpt_set_local_port(client_name, endpt_name, ((struct lyd_node_leaf_list *)node)->value.uint16)) {
++                    sr_free_change_iter(iter);
++                    return SR_ERR_INTERNAL;
++                }
++            } else if (op == SR_OP_DELETED) {
++                if (nc_server_ch_client_endpt_set_local_port(client_name, endpt_name, 0)) {
++                    sr_free_change_iter(iter);
++                    return SR_ERR_INTERNAL;
++                }
++            }
++    	} else if (!strcmp(node->schema->name, "keepalives")) {
+             if (op == SR_OP_CREATED) {
+                 rc = nc_server_ch_client_endpt_enable_keepalives(client_name, endpt_name, 1);
+             } else if (op == SR_OP_DELETED) {
+diff --git a/src/netconf_server.h b/src/netconf_server.h
+index cd56bd4..7b4408f 100644
+--- a/src/netconf_server.h
++++ b/src/netconf_server.h
+@@ -28,6 +28,12 @@ int np2srv_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_nam
+ int np2srv_ch_client_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
+         uint32_t request_id, void *private_data);
+ 
++int np2srv_re_call_home_no_ssh_timer(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
++        uint32_t request_id, void *private_data);
++
++int np2srv_max_call_home_attempts(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
++        uint32_t request_id, void *private_data);
++
+ int np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath,
+         uint32_t request_id, sr_event_t event, void *private_data);
+ 
+-- 
+2.17.1
+
