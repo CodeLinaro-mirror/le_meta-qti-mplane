@@ -1,6 +1,3 @@
-SUMMARY = ""
-DESCRIPTION = ""
-HOMEPAGE = ""
 SECTION = "libs"
 
 DEPENDS = "pcre"
@@ -8,12 +5,11 @@ DEPENDS = "pcre"
 LICENSE = "BSD-3-Clause"
 LIC_FILES_CHKSUM = "file://${COREBASE}/meta/files/common-licenses/BSD;md5=3775480a712fc46a69647678acb234cb"
 
-SRC_URI = "git://source.codeaurora.org/quic/le/libyang/;branch=caf3/libyang1"
+SRC_URI = "git://git.codelinaro.org/clo/le/libyang/;branch=caf3/libyang1"
 
 SRCREV = "127c1a97784f0dacc44b93f7f19d57ffcd5e8de4"
 
 S = "${WORKDIR}/git"
-
 
 inherit cmake
 

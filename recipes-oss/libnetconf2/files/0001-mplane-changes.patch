@@ -1,0 +1,566 @@
+From 1d6b50ecfc4a0468f78a2f1e80346130d6d8a8e7 Mon Sep 17 00:00:00 2001
+From: Risto Kuitunen <quic_rkuitune@quicinc.com>
+Date: Tue, 13 Dec 2022 14:44:16 +0100
+Subject: [PATCH] MPlane-required changes.
+
+Allow all versions when reading server capabilities. O-RAN modules
+use YANG version 1.1 instead of 1.0, they would be left out with the old
+LYS_VERSION_1.
+
+Allow the mplane generated message ids in addition to internally
+generated message id.
+
+fix send complete rpc reply msg to NetConf client and MplaneApp
+
+re-call-home-no-ssh-time feature support
+
+Forward error message without adding any xml tags
+
+Adding default value of re_call_home_no_ssh_timer
+
+Invaldate mplane message ID after use
+
+libnetconf2 support for local binding
+
+Return only yang version 1.0 modules in <hello> message.
+
+Fix memory leak that happens when client is terminated
+
+Implment support for max call home attempts
+
+Add callback notification when max call home attemps
+have been made
+---
+ src/io.c                 |   6 ++
+ src/session_client.c     |  44 ++++++++++-
+ src/session_client_ssh.c |   4 +-
+ src/session_client_tls.c |   2 +-
+ src/session_p.h          |  10 ++-
+ src/session_server.c     | 157 ++++++++++++++++++++++++++++++++++++++-
+ src/session_server.h     |  39 ++++++++++
+ src/session_server_ch.h  |  35 +++++++++
+ 8 files changed, 286 insertions(+), 11 deletions(-)
+
+diff --git a/src/io.c b/src/io.c
+index 252a8b4..1dc6155 100644
+--- a/src/io.c
++++ b/src/io.c
+@@ -998,6 +998,12 @@ nc_write_error(struct wclb_arg *arg, struct nc_server_error *err, const char *pr
+         pref_len = strlen(prefix);
+     }
+ 
++    // returning from here as we just need to forward the error messgage
++    // received from RU to DU without adding any tag (rpc-error/error-type etc)
++
++    nc_write_clb((void *)arg, err->message, strlen(err->message), 0);
++    return;
++
+     nc_write_error_elem(arg, "rpc-error", 9, prefix, pref_len, 1, 0);
+ 
+     nc_write_error_elem(arg, "error-type", 10, prefix, pref_len, 1, 0);
+diff --git a/src/session_client.c b/src/session_client.c
+index 941f872..62e128c 100644
+--- a/src/session_client.c
++++ b/src/session_client.c
+@@ -116,6 +116,8 @@ nc_client_context_free(void *ptr)
+         }
+         free(c->opts.ch_binds);
+         c->opts.ch_binds = NULL;
++        free(c->opts.ch_bind_ti);
++        c->opts.ch_bind_ti = NULL;
+         c->opts.ch_bind_count = 0;
+ #endif
+ #ifdef NC_ENABLED_SSH
+@@ -1245,7 +1247,7 @@ fail:
+    concept for e.g. call home settings). For more details see nc_sock_connect().
+  */
+ static int
+-_non_blocking_connect(int timeout, int *sock_pending, struct addrinfo *res, struct nc_keepalives *ka)
++_non_blocking_connect(int timeout, int *sock_pending, struct addrinfo *res, struct nc_keepalives *ka, const char *local_address, uint16_t local_port)
+ {
+     int flags, ret, error;
+     int sock = -1;
+@@ -1285,6 +1287,40 @@ _non_blocking_connect(int timeout, int *sock_pending, struct addrinfo *res, stru
+             ERR("fcntl() failed (%s).", strerror(errno));
+             goto cleanup;
+         }
++
++	if (local_address) {
++            struct sockaddr *localaddr_p;
++            uint16_t struct_sz;
++            struct sockaddr_in  localaddr_ipv4 = {0};
++            struct sockaddr_in6 localaddr_ipv6 = {0};
++
++            VRB("Bind to local address %s:%d", local_address, local_port);
++
++            if (res->ai_family == AF_INET6) {
++                localaddr_p = (struct sockaddr *)&localaddr_ipv6;
++                struct_sz = sizeof(localaddr_ipv6);
++                if (inet_pton(AF_INET6, local_address, localaddr_ipv6.sin6_addr.s6_addr) <= 0) {
++                    ERR("inet_pton() failed (%s)", strerror(errno));
++                    goto cleanup;
++                }
++                localaddr_ipv6.sin6_family   = AF_INET6;
++                localaddr_ipv6.sin6_port     = htons(local_port);
++                localaddr_ipv6.sin6_scope_id = 0;
++            }
++            else {
++                localaddr_p = (struct sockaddr *)&localaddr_ipv4;
++                struct_sz = sizeof(localaddr_ipv4);
++                localaddr_ipv4.sin_family      = AF_INET;
++                localaddr_ipv4.sin_port        = htons(local_port);
++                localaddr_ipv4.sin_addr.s_addr = inet_addr(local_address);
++            }
++
++            if (bind(sock, localaddr_p, struct_sz)) {
++                ERR("local bind() failed (%s).", strerror(errno));
++                goto cleanup;
++            }
++        }
++
+         /* non-blocking connect! */
+         if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
+             if (errno != EINPROGRESS) {
+@@ -1354,7 +1390,7 @@ cleanup:
+    has to be invoked, until it returns a valid socket.
+  */
+ int
+-nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepalives *ka, int *sock_pending, char **ip_host)
++nc_sock_connect(const char *host, uint16_t port, const char *local_address, uint16_t local_port, int timeout, struct nc_keepalives *ka, int *sock_pending, char **ip_host)
+ {
+     int i, opt;
+     int sock = sock_pending ? *sock_pending : -1;
+@@ -1379,7 +1415,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
+         }
+ 
+         for (res = res_list; res != NULL; res = res->ai_next) {
+-            sock = _non_blocking_connect(timeout, sock_pending, res, ka);
++            sock = _non_blocking_connect(timeout, sock_pending, res, ka, local_address, local_port);
+             if (sock == -1) {
+                 if (!sock_pending || *sock_pending == -1) {
+                     /* try the next resource */
+@@ -1423,7 +1459,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
+     } else {
+         /* try to get a connection with the pending socket */
+         assert(sock_pending);
+-        sock = _non_blocking_connect(timeout, sock_pending, NULL, ka);
++        sock = _non_blocking_connect(timeout, sock_pending, NULL, ka, local_address, local_port);
+     }
+ 
+     return sock;
+diff --git a/src/session_client_ssh.c b/src/session_client_ssh.c
+index 7097e8e..02dbd29 100644
+--- a/src/session_client_ssh.c
++++ b/src/session_client_ssh.c
+@@ -1575,7 +1575,7 @@ _nc_connect_libssh(ssh_session ssh_session, struct ly_ctx *ctx, struct nc_keepal
+         ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_HOST, host);
+ 
+         /* create and connect socket */
+-        sock = nc_sock_connect(host, port, -1, ka, NULL, &ip_host);
++        sock = nc_sock_connect(host, port, NULL, 0, -1, ka, NULL, &ip_host);
+         if (sock == -1) {
+             ERR("Unable to connect to %s:%u (%s).", host, port, strerror(errno));
+             goto fail;
+@@ -1725,7 +1725,7 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
+     ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_TIMEOUT, &timeout);
+ 
+     /* create and assign communication socket */
+-    sock = nc_sock_connect(host, port, -1, &client_opts.ka, NULL, &ip_host);
++    sock = nc_sock_connect(host, port, NULL, 0, -1, &client_opts.ka, NULL, &ip_host);
+     if (sock == -1) {
+         ERR("Unable to connect to %s:%u (%s).", host, port, strerror(errno));
+         goto fail;
+diff --git a/src/session_client_tls.c b/src/session_client_tls.c
+index b548dcb..91baeb8 100644
+--- a/src/session_client_tls.c
++++ b/src/session_client_tls.c
+@@ -622,7 +622,7 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
+     }
+ 
+     /* create and assign socket */
+-    sock = nc_sock_connect(host, port, -1, &client_opts.ka, NULL, &ip_host);
++    sock = nc_sock_connect(host, port, NULL, 0, -1, &client_opts.ka, NULL, &ip_host);
+     if (sock == -1) {
+         ERR("Unable to connect to %s:%u (%s).", host, port, strerror(errno));
+         goto fail;
+diff --git a/src/session_p.h b/src/session_p.h
+index 4e1346e..8985a42 100644
+--- a/src/session_p.h
++++ b/src/session_p.h
+@@ -26,6 +26,7 @@
+ #include "netconf.h"
+ #include "session.h"
+ #include "messages_client.h"
++#include "session_server.h"
+ 
+ #ifdef NC_ENABLED_SSH
+ 
+@@ -261,6 +262,8 @@ struct nc_server_opts {
+             NC_TRANSPORT_IMPL ti;
+             const char *address;
+             uint16_t port;
++	    const char *local_address;
++	    uint16_t local_port;
+             int sock_pending;
+             struct nc_keepalives ka;
+             union {
+@@ -288,6 +291,9 @@ struct nc_server_opts {
+     } *ch_clients;
+     uint16_t ch_client_count;
+     pthread_rwlock_t ch_client_lock;
++    atomic_uint_least16_t re_call_home_no_ssh_timer;
++    atomic_uint_least8_t max_call_home_attempts;
++    nc_server_ch_exceeded_clb max_callhome_clb;
+ 
+     /* Atomic IDs */
+     ATOMIC_UINT32_T new_session_id;
+@@ -553,13 +559,15 @@ NC_MSG_TYPE nc_handshake_io(struct nc_session *session);
+  *
+  * @param[in] host Hostname to connect to.
+  * @param[in] port Port to connect on.
++ * @param[in] local_address Local hostname to on connect.
++ * @param[in] local_port Local port to use on connect.
+  * @param[in] timeout for blocking the connect+select call (-1 for infinite).
+  * @param[in] ka Keepalives parameters.
+  * @param[in,out] sock_pending for exchanging the pending socket, if the blocking timeout was != -1
+  * @param[out] ip_host Optional parameter with string IP address of the connected host.
+  * @return Connected socket or -1 on error.
+  */
+-int nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepalives *ka, int *sock_pending, char **ip_host);
++int nc_sock_connect(const char *host, uint16_t port, const char *local_address, uint16_t local_port, int timeout, struct nc_keepalives *ka, int *sock_pending, char **ip_host);
+ 
+ /**
+  * @brief Accept a new socket connection.
+diff --git a/src/session_server.c b/src/session_server.c
+index 6025f39..55734ac 100644
+--- a/src/session_server.c
++++ b/src/session_server.c
+@@ -36,13 +36,18 @@
+ #include "session_server.h"
+ #include "session_server_ch.h"
+ 
++#define DEFAULT_RE_CALL_HOME_NO_SSH_TIMER 60
++#define MAX_CALL_HOME_ATTEMPTS_OFF 255
++
+ struct nc_server_opts server_opts = {
+ #ifdef NC_ENABLED_SSH
+     .authkey_lock = PTHREAD_MUTEX_INITIALIZER,
+ #endif
+     .bind_lock = PTHREAD_MUTEX_INITIALIZER,
+     .endpt_lock = PTHREAD_RWLOCK_INITIALIZER,
+-    .ch_client_lock = PTHREAD_RWLOCK_INITIALIZER
++    .ch_client_lock = PTHREAD_RWLOCK_INITIALIZER,
++    .re_call_home_no_ssh_timer = DEFAULT_RE_CALL_HOME_NO_SSH_TIMER,
++    .max_call_home_attempts = MAX_CALL_HOME_ATTEMPTS_OFF
+ };
+ 
+ static nc_rpc_clb global_rpc_clb = NULL;
+@@ -2390,6 +2395,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
+         for (i = 0; i < client->ch_endpt_count; ++i) {
+             lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
+             lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
++	    lydict_remove(server_opts.ctx, client->ch_endpts[i].local_address);
+             if (client->ch_endpts[i].sock_pending != -1) {
+                 close(client->ch_endpts[i].sock_pending);
+             }
+@@ -2422,6 +2428,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
+             if (!strcmp(client->ch_endpts[i].name, endpt_name) && (!ti || (ti == client->ch_endpts[i].ti))) {
+                 lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
+                 lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
++		lydict_remove(server_opts.ctx, client->ch_endpts[i].local_address);
+                 if (client->ch_endpts[i].sock_pending != -1) {
+                     close(client->ch_endpts[i].sock_pending);
+                 }
+@@ -2779,6 +2786,60 @@ nc_server_ch_client_endpt_set_address(const char *client_name, const char *endpt
+     return 0;
+ }
+ 
++API int
++nc_server_ch_client_endpt_set_local_address(const char *client_name, const char *endpt_name, const char *address)
++{
++    struct nc_ch_client *client;
++    struct nc_ch_endpt *endpt;
++    VRB("set local address");
++    if (!client_name) {
++        ERRARG("client_name");
++        return -1;
++    } else if (!endpt_name) {
++        ERRARG("endpt_name");
++        return -1;
++    } else if (!address) {
++        ERRARG("address");
++        return -1;
++    }
++
++    /* LOCK */
++    endpt = nc_server_ch_client_lock(client_name, endpt_name, 0, &client);
++    if (!endpt) {
++        return -1;
++    }
++
++    /* Local binding address/port */
++    lydict_remove(server_opts.ctx, endpt->local_address);
++    endpt->local_address = lydict_insert(server_opts.ctx, address, 0);
++
++    /* UNLOCK */
++    nc_server_ch_client_unlock(client);
++
++    return 0;
++}
++
++API int
++nc_server_ch_client_endpt_reset_local_address(const char *client_name, const char *endpt_name)
++{
++    struct nc_ch_client *client;
++    struct nc_ch_endpt *endpt;
++    VRB("reset local address");
++    /* LOCK */
++    endpt = nc_server_ch_client_lock(client_name, endpt_name, 0, &client);
++    if (!endpt) {
++        return -1;
++    }
++
++    lydict_remove(server_opts.ctx, endpt->local_address);
++    endpt->local_address = NULL;
++
++    /* UNLOCK */
++    nc_server_ch_client_unlock(client);
++
++    return 0;
++}
++
+ API int
+ nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_name, uint16_t port)
+ {
+@@ -2810,6 +2871,34 @@ nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_na
+     return 0;
+ }
+ 
++API int
++nc_server_ch_client_endpt_set_local_port(const char *client_name, const char *endpt_name, uint16_t port)
++{
++    struct nc_ch_client *client;
++    struct nc_ch_endpt *endpt;
++    VRB("set local port");
++    if (!client_name) {
++        ERRARG("client_name");
++        return -1;
++    } else if (!endpt_name) {
++        ERRARG("endpt_name");
++        return -1;
++    }
++
++    /* LOCK */
++    endpt = nc_server_ch_client_lock(client_name, endpt_name, 0, &client);
++    if (!endpt) {
++        return -1;
++    }
++
++    endpt->local_port = port;
++
++    /* UNLOCK */
++    nc_server_ch_client_unlock(client);
++
++    return 0;
++}
++
+ API int
+ nc_server_ch_client_endpt_enable_keepalives(const char *client_name, const char *endpt_name, int enable)
+ {
+@@ -3075,7 +3164,7 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
+     struct timespec ts_cur;
+     char *ip_host;
+ 
+-    sock = nc_sock_connect(endpt->address, endpt->port, 5, &endpt->ka, &endpt->sock_pending, &ip_host);
++    sock = nc_sock_connect(endpt->address, endpt->port, endpt->local_address, endpt->local_port, 5, &endpt->ka, &endpt->sock_pending, &ip_host);
+     if (sock < 0) {
+         return NC_MSG_ERROR;
+     }
+@@ -3275,6 +3364,7 @@ nc_ch_client_thread(void *arg)
+     struct nc_ch_client_thread_arg *data = (struct nc_ch_client_thread_arg *)arg;
+     NC_MSG_TYPE msgtype;
+     uint8_t cur_attempts = 0;
++    uint8_t total_attempts = 0;
+     uint16_t next_endpt_index;
+     char *cur_endpt_name = NULL;
+     struct nc_ch_endpt *cur_endpt;
+@@ -3298,6 +3388,9 @@ nc_ch_client_thread(void *arg)
+         msgtype = nc_connect_ch_endpt(cur_endpt, &session);
+ 
+         if (msgtype == NC_MSG_HELLO) {
++            /* Connection was made, clear the attempt counter */
++            total_attempts = 0;
++
+             /* UNLOCK */
+             nc_server_ch_client_unlock(client);
+ 
+@@ -3362,7 +3455,33 @@ nc_ch_client_thread(void *arg)
+             nc_server_ch_client_unlock(client);
+ 
+             /* session was not created */
+-            usleep(NC_CH_ENDPT_FAIL_WAIT * 1000);
++
++            uint16_t re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
++
++            if (re_call_home_no_ssh_timer == 0)
++            {
++                // if the value is 0, exiting the thread and
++                // O-RAN will not try to connect to this client.
++                goto cleanup;
++            }
++
++            ++total_attempts;
++            uint8_t max_call_home_attempts = nc_server_get_max_call_home_attempts();
++            if (max_call_home_attempts != MAX_CALL_HOME_ATTEMPTS_OFF &&
++                total_attempts >= max_call_home_attempts)
++            {
++                // if the maximum number of attempts has been made, exit
++                // function and O-RAN will not try to connect to this endpoint
++                VRB("Giving up, max_call_home_attempts = %u",
++                    max_call_home_attempts);
++                nc_server_ch_exceeded_clb clb =
++                    nc_server_get_call_home_exeeded_cb();
++                if (clb)
++                    clb();
++
++                goto cleanup;
++            }
++            usleep(re_call_home_no_ssh_timer * NC_CH_ENDPT_FAIL_WAIT * 1000);
+ 
+             /* LOCK */
+             client = nc_server_ch_client_with_endpt_lock(data->client_name);
+@@ -3506,3 +3625,35 @@ nc_session_is_callhome(const struct nc_session *session)
+ 
+     return 0;
+ }
++
++API void
++nc_server_update_re_call_home_no_ssh_timer(uint16_t value)
++{
++    server_opts.re_call_home_no_ssh_timer = value;
++}
++
++API void
++nc_server_update_max_call_home_attempts(uint8_t value,
++                                        nc_server_ch_exceeded_clb clb)
++{
++    server_opts.max_call_home_attempts = value;
++    server_opts.max_callhome_clb = clb;
++}
++
++uint16_t
++nc_server_get_re_call_home_no_ssh_timer()
++{
++    return server_opts.re_call_home_no_ssh_timer;
++}
++
++API uint8_t
++nc_server_get_max_call_home_attempts()
++{
++    return server_opts.max_call_home_attempts;
++}
++
++ nc_server_ch_exceeded_clb nc_server_get_call_home_exeeded_cb()
++ {
++     return server_opts.max_callhome_clb;
++ }
++
+diff --git a/src/session_server.h b/src/session_server.h
+index df7b075..e73a7bd 100644
+--- a/src/session_server.h
++++ b/src/session_server.h
+@@ -904,6 +904,45 @@ int nc_session_get_notif_status(const struct nc_session *session);
+  */
+ int nc_session_is_callhome(const struct nc_session *session);
+ 
++/**
++ * @brief Updates the re_callhome_no_ssh_timer to the
++ * global session datastructure
++ *
++ * @param[in] value value of timer in seconds.
++ */
++void nc_server_update_re_call_home_no_ssh_timer(uint16_t value);
++
++/**
++ * @brief Updates the max_call_home_attempts to the
++ * global session datastructure
++ *
++ * @param[in] value maximum number of attempts
++ */
++typedef void (*nc_server_ch_exceeded_clb)(void);
++void nc_server_update_max_call_home_attempts(uint8_t value,
++                                             nc_server_ch_exceeded_clb clb);
++
++/**
++ * @brief Get the re_callhome_no_ssh_timer
++ *
++ * @return value of timer in seconds.
++ */
++uint16_t nc_server_get_re_call_home_no_ssh_timer();
++
++/**
++ * @brief Get the max_call_home_attempts
++ *
++ * @return value of timer in seconds.
++ */
++uint8_t nc_server_get_max_call_home_attempts();
++
++/**
++ * @brief Get the call_home_exceeded callback
++ *
++ * @return callback function address
++ */
++nc_server_ch_exceeded_clb nc_server_get_call_home_exeeded_cb();
++
+ /**@} Server Session */
+ 
+ #ifdef __cplusplus
+diff --git a/src/session_server_ch.h b/src/session_server_ch.h
+index c40ccc1..23360d2 100644
+--- a/src/session_server_ch.h
++++ b/src/session_server_ch.h
+@@ -114,6 +114,41 @@ int nc_server_ch_client_endpt_set_address(const char *client_name, const char *e
+  */
+ int nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_name, uint16_t port);
+ 
++/**
++ * @brief Change Call Home client endpoint local binding address.
++ *
++ * On error the previous listening socket (if any) is left untouched.
++ *
++ * @param[in] client_name Existing Call Home client name.
++ * @param[in] endpt_name Existing endpoint name of \p client_name.
++ * @param[in] address New local binding address.
++ * @return 0 on success, -1 on error.
++ */
++int nc_server_ch_client_endpt_set_local_address(const char *client_name, const char *endpt_name, const char *address);
++
++/**
++ * @brief Reset Call Home client endpoint local binding address.
++ *
++ * On error the previous listening socket (if any) is left untouched.
++ *
++ * @param[in] client_name Existing Call Home client name.
++ * @param[in] endpt_name Existing endpoint name of \p client_name.
++ * @return 0 on success, -1 on error.
++ */
++int nc_server_ch_client_endpt_reset_local_address(const char *client_name, const char *endpt_name);
++
++/**
++ * @brief Change Call Home client endpoint local binding port.
++ *
++ * On error the previous listening socket (if any) is left untouched.
++ *
++ * @param[in] client_name Existing Call Home client name.
++ * @param[in] endpt_name Existing endpoint name of \p client_name.
++ * @param[in] port New local binding port.
++ * @return 0 on success, -1 on error.
++ */
++int nc_server_ch_client_endpt_set_local_port(const char *client_name, const char *endpt_name, uint16_t port);
++
+ /**
+  * @brief Change Call Home client endpoint keepalives state. Affects only new connections.
+  *
+-- 
+2.17.1
+
