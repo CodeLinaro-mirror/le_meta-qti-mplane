@@ -13,10 +13,19 @@ SRC_URI += "file://0001-mplane-changes.patch"
 
 S = "${WORKDIR}/git"
 
-inherit cmake
+inherit cmake useradd
 
 EXTRA_OECMAKE += " \
-	-DCMAKE_BUILD_TYPE=RELEASE \
+        -DCMAKE_BUILD_TYPE=RELEASE \
     -DGEN_LANGUAGE_BINDINGS=TRUE \
     -DGEN_PYTHON_BINDINGS=FALSE \
+    -DREPO_PATH=/data/mplane/sysrepo/ \
+"
+
+do_install_append(){
+  install -m 755 -o radio -g radio -d ${D}/data/mplane/
+}
+
+FILES_${PN} += " \
+        /data/mplane \
 "
