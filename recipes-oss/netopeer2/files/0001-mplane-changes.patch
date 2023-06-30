@@ -137,7 +137,7 @@ index 4260108..81ff715 100644
  
 +#ifdef DIAG_LOGGING
 +#include <diag/msg.h>   // for MSG_SPRINTF_1
-+#define MSG_SSID_LINUX_DATA   65
++#define MSG_SSID_CSM_ORAN_MPLANE_RU_NP   11064
 +#endif
 +
  volatile uint8_t np2_verbose_level;
@@ -150,16 +150,16 @@ index 4260108..81ff715 100644
 +#ifdef DIAG_LOGGING
 +        switch (priority) {
 +        case LOG_ERR:
-+            MSG_SPRINTF_1(MSG_SSID_LINUX_DATA, MSG_LEGACY_ERROR, "NP2: %s", format);
++            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_ERROR, "NP2: %s", format);
 +            break;
 +        case LOG_WARNING:
-+            MSG_SPRINTF_1(MSG_SSID_LINUX_DATA, MSG_LEGACY_HIGH, "NP2: %s", format);
++            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_HIGH, "NP2: %s", format);
 +            break;
 +        case LOG_INFO:
-+            MSG_SPRINTF_1(MSG_SSID_LINUX_DATA, MSG_LEGACY_MED, "NP2: %s", format);
++            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_MED, "NP2: %s", format);
 +            break;
 +        default:
-+            MSG_SPRINTF_1(MSG_SSID_LINUX_DATA, MSG_LEGACY_LOW, "NP2: %s", format);
++            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_LOW, "NP2: %s", format);
 +            break;
 +        }
 +#endif
