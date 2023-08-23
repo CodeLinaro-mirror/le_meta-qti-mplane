@@ -1,2 +1,0 @@
-# timeout to be used by netopeer2 for all sysrepo operations
-sr_timeout=120

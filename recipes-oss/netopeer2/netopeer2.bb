@@ -9,7 +9,6 @@ SRC_URI = "git://git.codelinaro.org/clo/le/netopeer2.git;branch=caf4/libyang1"
 SRCREV = "c596ed5635ca0013b62785c1733e61818b5ebfc6"
 
 SRC_URI += "file://0001-mplane-changes.patch"
-SRC_URI += "file://np_config.txt"
 
 S = "${WORKDIR}/git"
 
@@ -34,7 +33,4 @@ do_install_append(){
   install -d ${D}${datadir}/mplane/
   install -m 0755 ${S}/scripts/setup.sh -D ${D}${datadir}/mplane/setup.sh
   install -d ${D}${systemd_unitdir}/system
-  install -d ${D}/etc/mplane/ru/config
-  install -m 0555 ${WORKDIR}/np_config.txt ${D}/etc/mplane/ru/config
 }
-
