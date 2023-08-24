@@ -3,13 +3,14 @@ From: Vishal Tripathi <quic_vishalt@quicinc.com>
 Date: Fri, 31 Mar 2023 10:09:34 +0200
 Subject: [PATCH] M-plane additions
 
+make sysrepo operations timeout to be configurable
+
 Make hostkey insertion compatible with earlier yang modules
 
 Also clean-up netopeer2's setup.sh script, only install
 minimal set of yang modules
 
-Send o-ran-operations:reset when max call home attempts have
- been made
+Send o-ran-operations:reset when max call home attempts have been made
 
 Add diag logging.
 
@@ -128,7 +129,7 @@ index 317e5ef..b5d7711 100755
  
  # functions
 diff --git a/src/log.c b/src/log.c
-index 4260108..81ff715 100644
+index 4260108..e99a38d 100644
 --- a/src/log.c
 +++ b/src/log.c
 @@ -28,6 +28,11 @@
@@ -245,7 +246,7 @@ index 66262e4..b98e337 100644
 +
  #endif /* NP2SRV_LOG_H_ */
 diff --git a/src/main.c b/src/main.c
-index d1abcdb..600fefc 100644
+index d1abcdb..3b7c4b7 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -39,6 +39,7 @@
@@ -343,7 +344,62 @@ index d1abcdb..600fefc 100644
  #endif
              break;
          case 'V':
-@@ -1307,6 +1332,12 @@ main(int argc, char *argv[])
+@@ -1248,6 +1273,54 @@ main(int argc, char *argv[])
+         }
+     }
+ 
++    {
++        #define MAX_LINE_LENGTH 100
++        char line[MAX_LINE_LENGTH];
++        // Open the file for reading
++        FILE *file = fopen("/etc/mplane/ru/config/np_config.txt", "r");
++        if (file == NULL)
++        {
++            WRN("Error opening the file.\n");
++        }
++        uint32_t timeoutValue = 0;
++        // Read lines from the file
++        while (fgets(line, MAX_LINE_LENGTH, file) != NULL)
++        {
++            // Find the position of the '=' character
++            char *separator = strchr(line, '=');
++            if (separator != NULL)
++            {
++                // Split the line into key and value using the '=' character
++                char key[MAX_LINE_LENGTH/2];
++                char value[MAX_LINE_LENGTH/2];
++                *separator = '\0';
++                strcpy(key, line);
++                strcpy(value, separator + 1);
++    
++                // Check if the key is "timeout"
++                if (strcmp(key, "sr_timeout") == 0)
++                {
++                    // Convert the value to an integer
++                    timeoutValue = atoi(value);
++                    DBG("sr timeout is %ds\n", timeoutValue);
++                }
++                else
++                {
++                    WRN("%s\n",value);
++                }
++            }
++        }
++        
++        // Close the file
++        fclose(file);
++
++        if (timeoutValue)
++        {
++            np2srv.sr_timeout = timeoutValue;
++            np2srv.sr_timeout *= 1000;
++        }
++    }
++    WRN("sr timeout is %ds\n", np2srv.sr_timeout);
+     /* daemonize */
+     if (daemonize == 1) {
+         if (daemon(0, 0) != 0) {
+@@ -1307,6 +1380,12 @@ main(int argc, char *argv[])
      ly_set_log_clb(np2log_cb_ly, 1); /* libyang */
      sr_log_set_cb(np2log_cb_sr); /* sysrepo, log level is checked by callback */
  
@@ -356,7 +412,7 @@ index d1abcdb..600fefc 100644
      /* initiate NETCONF server */
      if (server_init()) {
          ret = EXIT_FAILURE;
-@@ -1379,5 +1410,10 @@ cleanup:
+@@ -1379,5 +1458,10 @@ cleanup:
      /* removes the context and clears all the sessions */
      sr_disconnect(np2srv.sr_conn);
  
@@ -498,6 +554,3 @@ index cd56bd4..7b4408f 100644
  int np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath,
          uint32_t request_id, sr_event_t event, void *private_data);
  
--- 
-2.17.1
-
