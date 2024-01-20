@@ -6,5 +6,6 @@ PACKAGE_ARCH = "${MACHINE_ARCH}"
 
 RDEPENDS_${PN} = " \
     netopeer2 \
+    yang-modules \
 "
 
