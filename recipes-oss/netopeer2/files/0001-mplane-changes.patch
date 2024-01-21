@@ -3,6 +3,8 @@ From: Vishal Tripathi <quic_vishalt@quicinc.com>
 Date: Fri, 31 Mar 2023 10:09:34 +0200
 Subject: [PATCH] M-plane additions
 
+read authorized_keys from /data/mplane/.ssh
+
 make sysrepo operations timeout to be configurable
 
 Make hostkey insertion compatible with earlier yang modules
@@ -27,17 +29,18 @@ Diag should only be linked if the diag library is found.
 Moved ietf-netconf features from ietf-library to setup.sh
 
 ---
- CMakeLists.txt                 | 17 +++++++
+ CMakeLists.txt                 | 17 ++++++
  CMakeModules/FindSysrepo.cmake | 12 ++++-
  scripts/merge_hostkey.sh       |  2 +-
- scripts/setup.sh               | 11 -----
- src/log.c                      | 77 +++++++++++++++++++++++++++++++
+ scripts/setup.sh               | 11 ----
+ src/log.c                      | 77 +++++++++++++++++++++++++++
  src/log.h                      |  6 +++
- src/main.c                     | 48 +++++++++++++++++---
+ src/main.c                     | 96 +++++++++++++++++++++++++++++++---
  src/netconf.c                  |  2 +-
- src/netconf_server.c           | 83 ++++++++++++++++++++++++++++++++++
+ src/netconf_server.c           | 83 +++++++++++++++++++++++++++++
  src/netconf_server.h           |  6 +++
- 10 files changed, 243 insertions(+), 21 deletions(-)
+ src/netconf_server_ssh.c       |  4 +-
+ 11 files changed, 293 insertions(+), 23 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..59b5f30 100644
@@ -554,3 +557,28 @@ index cd56bd4..7b4408f 100644
  int np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath,
          uint32_t request_id, sr_event_t event, void *private_data);
  
+diff --git a/src/netconf_server_ssh.c b/src/netconf_server_ssh.c
+index 1cfd3fa..e45397a 100644
+--- a/src/netconf_server_ssh.c
++++ b/src/netconf_server_ssh.c
+@@ -98,7 +98,7 @@ np2srv_pubkey_auth_cb(const struct nc_session *session, ssh_key key, void *UNUSE
+     }
+ 
+     /* check any authorized keys */
+-    r = asprintf(&line, NP2SRV_SSH_AUTHORIZED_KEYS_PATTERN, NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
++    r = asprintf(&line, "/data/mplane/radio/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
+     if (r == -1) {
+         EMEM;
+         line = NULL;
+@@ -426,7 +426,7 @@ np2srv_endpt_ssh_auth_users_oper_cb(sr_session_ctx_t *UNUSED(session), const cha
+         lyd_new_leaf(user, NULL, "name", pwd->pw_name);
+ 
+         /* check any authorized keys */
+-        if (asprintf(&path, NP2SRV_SSH_AUTHORIZED_KEYS_PATTERN, NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir) == -1) {
++        if (asprintf(&path, "/data/mplane/radio/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir) == -1) {
+             EMEM;
+             goto cleanup;
+         }
+-- 
+2.17.1
+
