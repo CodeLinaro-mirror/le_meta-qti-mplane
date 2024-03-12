@@ -1,9 +1,12 @@
-From 1884d5e5249d20f49f38b253495d302e673dc99a Mon Sep 17 00:00:00 2001
-From: Vishal Tripathi <quic_vishalt@quicinc.com>
-Date: Fri, 31 Mar 2023 10:09:34 +0200
-Subject: [PATCH] M-plane additions
+This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 
-read authorized_keys from /data/mplane/.ssh
+Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+
+From 7f4e5e38eb0faee0039b6cb9aade228b75418ae1 Mon Sep 17 00:00:00 2001
+From: Risto Kuitunen <quic_rkuitune@quicinc.com>
+Date: Wed, 20 Mar 2024 10:35:14 +0100
+Subject: [PATCH] read authorized_keys from /data/mplane/.ssh
 
 make sysrepo operations timeout to be configurable
 
@@ -28,11 +31,16 @@ Diag should only be linked if the diag library is found.
 
 Moved ietf-netconf features from ietf-library to setup.sh
 
+Send success-vote to ab-updater if the library is found.
+
+Signed-off-by: Risto Kuitunen <quic_rkuitune@quicinc.com>
+
 ---
- CMakeLists.txt                 | 17 ++++++
+ CMakeLists.txt                 | 36 +++++++++++++
  CMakeModules/FindSysrepo.cmake | 12 ++++-
  scripts/merge_hostkey.sh       |  2 +-
  scripts/setup.sh               | 11 ----
+ src/common.c                   |  9 ++++
  src/log.c                      | 77 +++++++++++++++++++++++++++
  src/log.h                      |  6 +++
  src/main.c                     | 96 +++++++++++++++++++++++++++++++---
@@ -40,13 +48,13 @@ Moved ietf-netconf features from ietf-library to setup.sh
  src/netconf_server.c           | 83 +++++++++++++++++++++++++++++
  src/netconf_server.h           |  6 +++
  src/netconf_server_ssh.c       |  4 +-
- 11 files changed, 293 insertions(+), 23 deletions(-)
+ 12 files changed, 321 insertions(+), 23 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index be6700b..59b5f30 100644
+index be6700b..44355b0 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -275,3 +275,20 @@ add_custom_target(cleancache
+@@ -275,3 +275,39 @@ add_custom_target(cleancache
  
  # uninstall
  add_custom_target(uninstall "${CMAKE_COMMAND}" -P "${CMAKE_MODULE_PATH}/uninstall.cmake")
@@ -59,6 +67,14 @@ index be6700b..59b5f30 100644
 +    ${CMAKE_INSTALL_PREFIX}/lib
 +)
 +
++find_library(SETSUCCESSVOTER_LIBRARY
++    NAMES
++	libsetsuccessvoter.so
++    PATHS
++	${CMAKE_LIBRARY_PATH}
++	${CMAKE_INSTALL_PREFIX}/lib
++)
++
 +if(${DIAG_LIBRARY} STREQUAL DIAG_LIBRARY-NOTFOUND)
 +  message("Diag not found for project: ${PROJECT_NAME}")
 +else()
@@ -67,6 +83,17 @@ index be6700b..59b5f30 100644
 +  target_compile_definitions(netopeer2-server PUBLIC DIAG_LOGGING)
 +  target_compile_definitions(serverobj PUBLIC DIAG_LOGGING)
 +endif()
++
++if(${SETSUCCESSVOTER_LIBRARY} STREQUAL SETSUCCESSVOTER_LIBRARY-NOTFOUND)
++  message("successvoter not found for project: ${PROJECT_NAME}")
++else()
++  message("successvoter found for project: ${PROJECT_NAME}")
++  target_link_libraries(serverobj ${SETSUCCESSVOTER_LIBRARY})
++  target_link_libraries(netopeer2-server ${SETSUCCESSVOTER_LIBRARY})
++  target_compile_definitions(netopeer2-server PUBLIC SUCCESVOTER_ENABLED)
++  target_compile_definitions(serverobj PUBLIC SUCCESVOTER_ENABLED)
++endif()
++
 diff --git a/CMakeModules/FindSysrepo.cmake b/CMakeModules/FindSysrepo.cmake
 index 8dda6df..65f77e1 100644
 --- a/CMakeModules/FindSysrepo.cmake
@@ -131,6 +158,33 @@ index 317e5ef..b5d7711 100755
  )
  
  # functions
+diff --git a/src/common.c b/src/common.c
+index 02ef4ba..27e08e2 100644
+--- a/src/common.c
++++ b/src/common.c
+@@ -38,6 +38,9 @@
+ #include "netconf_acm.h"
+ #include "netconf_monitoring.h"
+ 
++#ifdef SUCCESVOTER_ENABLED
++#include "libsetsuccessvoter.h"
++#endif
+ struct np2srv np2srv = {.unix_mode = -1, .unix_uid = -1, .unix_gid = -1};
+ 
+ int
+@@ -179,6 +182,12 @@ np2srv_new_session_cb(const char *UNUSED(client_name), struct nc_session *new_se
+         free(event_data);
+     }
+ 
++#ifdef SUCCESVOTER_ENABLED
++    VRB("Sending success vote to ab-updater");
++    const char *modulename = "netopeer2";
++    libSetSuccessVoter(modulename);
++#endif
++
+     return;
+ 
+ error:
 diff --git a/src/log.c b/src/log.c
 index 4260108..e99a38d 100644
 --- a/src/log.c
