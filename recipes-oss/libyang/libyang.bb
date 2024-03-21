@@ -9,6 +9,8 @@ SRC_URI = "git://git.codelinaro.org/clo/le/libyang/;branch=caf3/libyang1"
 
 SRCREV = "127c1a97784f0dacc44b93f7f19d57ffcd5e8de4"
 
+SRC_URI += "file://0001-Added-the-support-for-multiple-result-in-libyang.patch"
+
 S = "${WORKDIR}/git"
 
 inherit cmake
