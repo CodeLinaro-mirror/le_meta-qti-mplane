@@ -1,6 +1,11 @@
-From 1d6b50ecfc4a0468f78a2f1e80346130d6d8a8e7 Mon Sep 17 00:00:00 2001
-From: Risto Kuitunen <quic_rkuitune@quicinc.com>
-Date: Tue, 13 Dec 2022 14:44:16 +0100
+This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
+
+Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause-Clear 
+
+From 3737a207a2f3f3209c72c26d27c3ccde6a83c9ff Mon Sep 17 00:00:00 2001
+From: opensource<quic_username@quicinc.com>
+Date: Thu, 11 Apr 2024 11:02:35 +0200
 Subject: [PATCH] MPlane-required changes.
 
 Allow all versions when reading server capabilities. O-RAN modules
@@ -30,16 +35,21 @@ Implment support for max call home attempts
 
 Add callback notification when max call home attemps
 have been made
+
+support for mplane dscp change
+
+Signed-off-by: Vishal Tripathi <quic_vishalt@quicinc.com>
+
 ---
  src/io.c                 |   6 ++
- src/session_client.c     |  44 ++++++++++-
+ src/session_client.c     |  44 +++++++-
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
- src/session_p.h          |  10 ++-
- src/session_server.c     | 157 ++++++++++++++++++++++++++++++++++++++-
- src/session_server.h     |  39 ++++++++++
- src/session_server_ch.h  |  35 +++++++++
- 8 files changed, 286 insertions(+), 11 deletions(-)
+ src/session_p.h          |  12 ++-
+ src/session_server.c     | 220 ++++++++++++++++++++++++++++++++++++++-
+ src/session_server.h     |  53 ++++++++++
+ src/session_server_ch.h  |  35 +++++++
+ 8 files changed, 365 insertions(+), 11 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..1dc6155 100644
@@ -184,7 +194,7 @@ index b548dcb..91baeb8 100644
          ERR("Unable to connect to %s:%u (%s).", host, port, strerror(errno));
          goto fail;
 diff --git a/src/session_p.h b/src/session_p.h
-index 4e1346e..8985a42 100644
+index 4e1346e..d5ad175 100644
 --- a/src/session_p.h
 +++ b/src/session_p.h
 @@ -26,6 +26,7 @@
@@ -204,7 +214,16 @@ index 4e1346e..8985a42 100644
              int sock_pending;
              struct nc_keepalives ka;
              union {
-@@ -288,6 +291,9 @@ struct nc_server_opts {
+@@ -271,6 +274,8 @@ struct nc_server_opts {
+                 struct nc_server_tls_opts *tls;
+ #endif
+             } opts;
++            int sock;
++            uint8_t dscp;
+         } *ch_endpts;
+         uint16_t ch_endpt_count;
+         NC_CH_CONN_TYPE conn_type;
+@@ -288,6 +293,9 @@ struct nc_server_opts {
      } *ch_clients;
      uint16_t ch_client_count;
      pthread_rwlock_t ch_client_lock;
@@ -214,7 +233,7 @@ index 4e1346e..8985a42 100644
  
      /* Atomic IDs */
      ATOMIC_UINT32_T new_session_id;
-@@ -553,13 +559,15 @@ NC_MSG_TYPE nc_handshake_io(struct nc_session *session);
+@@ -553,13 +561,15 @@ NC_MSG_TYPE nc_handshake_io(struct nc_session *session);
   *
   * @param[in] host Hostname to connect to.
   * @param[in] port Port to connect on.
@@ -232,7 +251,7 @@ index 4e1346e..8985a42 100644
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..55734ac 100644
+index 6025f39..821250d 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
 @@ -36,13 +36,18 @@
@@ -367,7 +386,7 @@ index 6025f39..55734ac 100644
  API int
  nc_server_ch_client_endpt_enable_keepalives(const char *client_name, const char *endpt_name, int enable)
  {
-@@ -3075,7 +3164,7 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
+@@ -3075,10 +3164,19 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
      struct timespec ts_cur;
      char *ip_host;
  
@@ -376,7 +395,19 @@ index 6025f39..55734ac 100644
      if (sock < 0) {
          return NC_MSG_ERROR;
      }
-@@ -3275,6 +3364,7 @@ nc_ch_client_thread(void *arg)
++
++    // shifting by 2 as DSCP mask is (1111 1100)
++    int dscp = endpt->dscp << 2;
++    if (setsockopt(sock, IPPROTO_IP, IP_TOS, &dscp, sizeof dscp ) == -1) {
++        ERR("Could not set IP_TOS socket option (%s).", strerror(errno));
++        goto fail;
++    }
++    VRB("Successfully set the m_plane_marking to %d", endpt->dscp);
++    endpt->sock = sock;
+     /* no need to store the socket as pending any longer */
+     endpt->sock_pending = -1;
+ 
+@@ -3275,6 +3373,7 @@ nc_ch_client_thread(void *arg)
      struct nc_ch_client_thread_arg *data = (struct nc_ch_client_thread_arg *)arg;
      NC_MSG_TYPE msgtype;
      uint8_t cur_attempts = 0;
@@ -384,7 +415,7 @@ index 6025f39..55734ac 100644
      uint16_t next_endpt_index;
      char *cur_endpt_name = NULL;
      struct nc_ch_endpt *cur_endpt;
-@@ -3298,6 +3388,9 @@ nc_ch_client_thread(void *arg)
+@@ -3298,6 +3397,9 @@ nc_ch_client_thread(void *arg)
          msgtype = nc_connect_ch_endpt(cur_endpt, &session);
  
          if (msgtype == NC_MSG_HELLO) {
@@ -394,7 +425,7 @@ index 6025f39..55734ac 100644
              /* UNLOCK */
              nc_server_ch_client_unlock(client);
  
-@@ -3362,7 +3455,33 @@ nc_ch_client_thread(void *arg)
+@@ -3362,7 +3464,33 @@ nc_ch_client_thread(void *arg)
              nc_server_ch_client_unlock(client);
  
              /* session was not created */
@@ -429,7 +460,7 @@ index 6025f39..55734ac 100644
  
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
-@@ -3506,3 +3625,35 @@ nc_session_is_callhome(const struct nc_session *session)
+@@ -3506,3 +3634,89 @@ nc_session_is_callhome(const struct nc_session *session)
  
      return 0;
  }
@@ -465,11 +496,65 @@ index 6025f39..55734ac 100644
 +     return server_opts.max_callhome_clb;
 + }
 +
++API int8_t
++nc_server_update_m_plane_marking(char *addr, uint8_t value)
++{
++    // shifting by 2 as DSCP mask is (1111 1100)
++    int dscp = value << 2;
++    if (addr) {
++        for (uint8_t client_count = 0; client_count < server_opts.ch_client_count; client_count++)
++        {
++            for (uint8_t endpt_count = 0; endpt_count < server_opts.ch_clients[client_count].ch_endpt_count; endpt_count++)
++            {
++                if (!strcmp(server_opts.ch_clients[client_count].ch_endpts[endpt_count].local_address, addr))
++                {
++                    ERR("endpnt name: %s", server_opts.ch_clients[client_count].ch_endpts[endpt_count].name);
++                    ERR("endpnt sock: %d", server_opts.ch_clients[client_count].ch_endpts[endpt_count].sock);
++                    server_opts.ch_clients[client_count].ch_endpts[endpt_count].dscp = value;
++                    int sock = server_opts.ch_clients[client_count].ch_endpts[endpt_count].sock;
++                    if (sock)
++                    {
++                        if (setsockopt(sock, IPPROTO_IP, IP_TOS, &dscp, sizeof dscp ) == -1)
++                        {
++                            ERR("Could not set IP_TOS socket option (%s).", strerror(errno));
++                            return -1;
++                        }
++                    }
++                    VRB("Successfully set the m_plane_marking to %d", value);
++                }
++            }
++        }
++    }
++    return 0;
++}
++
++API int8_t nc_server_get_address_and_dscp_list(char *addr[], uint8_t dscp[], uint8_t *count, uint8_t max_count)
++{
++    uint8_t MAX_ADDR_LEN = 128;
++    for (uint8_t i = 0; i < server_opts.ch_client_count; i++)
++    {
++        for (uint8_t j = 0; j < server_opts.ch_clients[i].ch_endpt_count; j++)
++        {
++            addr[*count] = calloc(1, MAX_ADDR_LEN);
++            memcpy(addr[*count], server_opts.ch_clients[i].ch_endpts[j].local_address, strlen(server_opts.ch_clients[i].ch_endpts[j].local_address));
++            dscp[*count] = server_opts.ch_clients[i].ch_endpts[j].dscp;
++            (*count)++;
++            if (*count == max_count)
++            {
++                return 0;
++            }
++        }
++        
++        //memcpy(addr[i], server_opts.ch_clients[*count].ch_endpts[0].local_address, sizeof(server_opts.ch_clients[*count].ch_endpts[0].local_address));
++        //dscp[i] = server_opts.ch_clients[*count].ch_endpts[0].dscp;
++    }
++    return 0;
++}
 diff --git a/src/session_server.h b/src/session_server.h
-index df7b075..e73a7bd 100644
+index df7b075..f720a5d 100644
 --- a/src/session_server.h
 +++ b/src/session_server.h
-@@ -904,6 +904,45 @@ int nc_session_get_notif_status(const struct nc_session *session);
+@@ -904,6 +904,59 @@ int nc_session_get_notif_status(const struct nc_session *session);
   */
  int nc_session_is_callhome(const struct nc_session *session);
  
@@ -504,6 +589,20 @@ index df7b075..e73a7bd 100644
 + * @return value of timer in seconds.
 + */
 +uint8_t nc_server_get_max_call_home_attempts();
++
++/**
++ * @brief update m_mplane_marking
++ *
++ * @return error if failed to update socket.
++ */
++int8_t nc_server_update_m_plane_marking(char *addr, uint8_t value);
++
++/**
++ * @brief get list of configured interfaces and dscp
++ *
++ * @return error if failed to update socket.
++ */
++int8_t nc_server_get_address_and_dscp_list(char *addr[], uint8_t dscp[], uint8_t *count, uint8_t max_count);
 +
 +/**
 + * @brief Get the call_home_exceeded callback
