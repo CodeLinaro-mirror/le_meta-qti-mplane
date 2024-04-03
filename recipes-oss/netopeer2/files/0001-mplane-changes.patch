@@ -3,7 +3,7 @@ This patch file is from Qualcomm Innovation Center, Inc. and is provided under t
 Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
 
-From 7f4e5e38eb0faee0039b6cb9aade228b75418ae1 Mon Sep 17 00:00:00 2001
+From 919f3cd214909eb176e10f67880eeb95198e79cc Mon Sep 17 00:00:00 2001
 From: Risto Kuitunen <quic_rkuitune@quicinc.com>
 Date: Wed, 20 Mar 2024 10:35:14 +0100
 Subject: [PATCH] read authorized_keys from /data/mplane/.ssh
@@ -31,24 +31,24 @@ Diag should only be linked if the diag library is found.
 
 Moved ietf-netconf features from ietf-library to setup.sh
 
-Send success-vote to ab-updater if the library is found.
+Send success-vote to ab-updater if the libsetsuccessvoter library is found.
 
 Signed-off-by: Risto Kuitunen <quic_rkuitune@quicinc.com>
 
 ---
- CMakeLists.txt                 | 36 +++++++++++++
- CMakeModules/FindSysrepo.cmake | 12 ++++-
- scripts/merge_hostkey.sh       |  2 +-
- scripts/setup.sh               | 11 ----
- src/common.c                   |  9 ++++
- src/log.c                      | 77 +++++++++++++++++++++++++++
- src/log.h                      |  6 +++
- src/main.c                     | 96 +++++++++++++++++++++++++++++++---
- src/netconf.c                  |  2 +-
- src/netconf_server.c           | 83 +++++++++++++++++++++++++++++
- src/netconf_server.h           |  6 +++
- src/netconf_server_ssh.c       |  4 +-
- 12 files changed, 321 insertions(+), 23 deletions(-)
+ CMakeLists.txt                 |  36 +++++++++
+ CMakeModules/FindSysrepo.cmake |  12 ++-
+ scripts/merge_hostkey.sh       |   2 +-
+ scripts/setup.sh               |  11 ---
+ src/common.c                   |   9 +++
+ src/log.c                      |  77 ++++++++++++++++++++
+ src/log.h                      |   6 ++
+ src/main.c                     | 129 +++++++++++++++++++++++++++++++--
+ src/netconf.c                  |   2 +-
+ src/netconf_server.c           |  83 +++++++++++++++++++++
+ src/netconf_server.h           |   6 ++
+ src/netconf_server_ssh.c       |   4 +-
+ 12 files changed, 354 insertions(+), 23 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..44355b0 100644
@@ -303,7 +303,7 @@ index 66262e4..b98e337 100644
 +
  #endif /* NP2SRV_LOG_H_ */
 diff --git a/src/main.c b/src/main.c
-index d1abcdb..3b7c4b7 100644
+index d1abcdb..8628477 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -39,6 +39,7 @@
@@ -371,7 +371,47 @@ index d1abcdb..3b7c4b7 100644
  #endif
  
      while (ATOMIC_LOAD_RELAXED(loop_continue)) {
-@@ -1120,21 +1140,26 @@ main(int argc, char *argv[])
+@@ -1098,6 +1118,39 @@ main(int argc, char *argv[])
+     openlog("netopeer2-server", LOG_PID, LOG_DAEMON);
+     np2_stderr_log = 1;
+ 
++#ifdef SUCCESVOTER_ENABLED
++    #define MAX_LINE_LENGTH_MACHINE 100
++    char machine_name_line[MAX_LINE_LENGTH_MACHINE];
++    FILE *machine_name_file = fopen("/sys/devices/soc0/machine", "r");
++    if (machine_name_file == NULL)
++    {
++        WRN("Failed to open /sys/devices/soc0/machine to determine machine.\n");
++        return EXIT_FAILURE;
++    }
++
++    // Read lines from the file
++    while (fgets(machine_name_line, MAX_LINE_LENGTH_MACHINE, machine_name_file) != NULL)
++    {
++        if (!strncmp(machine_name_line, "CINDERDU", 8))
++        {
++            VRB("Executing ru_mplane_app on CINDER DU SOC");
++            VRB("Sending success vote to ab-updater");
++            const char *modulename = "netopeer2";
++            libSetSuccessVoter(modulename);
++            return EXIT_SUCCESS;
++        }
++
++        if (!strncmp(machine_name_line, "CINDERRU", 8))
++        {
++            VRB("Executing ru_mplane_app on CINDER RU SOC");
++        }
++        else
++        {
++            WRN("Executing netopeer2 on an unsupported machine");
++        }
++    }
++#endif
++
+     /* process command line options */
+     while ((c = getopt(argc, argv, "dhVp:U::m:u:g:t:v:c:")) != -1) {
+         switch (c) {
+@@ -1120,21 +1173,26 @@ main(int argc, char *argv[])
              switch (np2_verbose_level) {
              case NC_VERB_ERROR:
                  np2_sr_verbose_level = SR_LL_ERR;
@@ -401,7 +441,7 @@ index d1abcdb..3b7c4b7 100644
  #endif
              break;
          case 'V':
-@@ -1248,6 +1273,54 @@ main(int argc, char *argv[])
+@@ -1248,6 +1306,54 @@ main(int argc, char *argv[])
          }
      }
  
@@ -456,7 +496,7 @@ index d1abcdb..3b7c4b7 100644
      /* daemonize */
      if (daemonize == 1) {
          if (daemon(0, 0) != 0) {
-@@ -1307,6 +1380,12 @@ main(int argc, char *argv[])
+@@ -1307,6 +1413,12 @@ main(int argc, char *argv[])
      ly_set_log_clb(np2log_cb_ly, 1); /* libyang */
      sr_log_set_cb(np2log_cb_sr); /* sysrepo, log level is checked by callback */
  
@@ -469,7 +509,7 @@ index d1abcdb..3b7c4b7 100644
      /* initiate NETCONF server */
      if (server_init()) {
          ret = EXIT_FAILURE;
-@@ -1379,5 +1458,10 @@ cleanup:
+@@ -1379,5 +1491,10 @@ cleanup:
      /* removes the context and clears all the sessions */
      sr_disconnect(np2srv.sr_conn);
  
