@@ -1,0 +1,32 @@
+This patch file is from Qualcomm Innovation Center, Inc. and is provided
+under the following license:
+
+Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+
+From b9f3f01785d79d2564e987eb09b6f5d74c648b15 Mon Sep 17 00:00:00 2001
+From: Balram Panwar <quic_panwar@quicinc.com>
+Date: Tue, 14 May 2024 12:01:54 -0700
+Subject: [PATCH] Remove the validity bit in multiple result implementation
+
+Signed-off-by: Balram Panwar <quic_panwar@quicinc.com>
+---
+ src/tree_data.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/src/tree_data.c b/src/tree_data.c
+index 14dd83761..3df9c6ccb 100644
+--- a/src/tree_data.c
++++ b/src/tree_data.c
+@@ -232,8 +232,6 @@ lyd_list_equal(struct lyd_node *node1, struct lyd_node *node2, int with_defaults
+                             LOGERR(ctx, LY_EINVAL, "%s: failed to add the diff leaf in case of multiple result", __func__);
+                             return -1;
+                         }
+-                        assert(!(elem1->validity & LYD_VAL_INUSE));
+-                        elem1->validity |= LYD_VAL_INUSE;
+                     }
+                 } else if (elem2->schema->nodetype & LYS_ANYDATA) {
+                     if (!lyd_anydata_equal(elem1, elem2)) {
+-- 
+2.17.1
+
