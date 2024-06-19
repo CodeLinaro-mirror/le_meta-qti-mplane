@@ -38,19 +38,19 @@ Update dscp on netopeer2 socket
 Signed-off-by: Vishal Tripathi <quic_vishalt@quicinc.com>
 
 ---
- CMakeLists.txt                 |  36 +++++++++
+ CMakeLists.txt                 |  36 +++++++
  CMakeModules/FindSysrepo.cmake |  12 ++-
  scripts/merge_hostkey.sh       |   2 +-
- scripts/setup.sh               |  11 ---
- src/common.c                   |   9 +++
- src/log.c                      |  77 ++++++++++++++++++
+ scripts/setup.sh               |  11 --
+ src/common.c                   |   9 ++
+ src/log.c                      |  77 ++++++++++++++
  src/log.h                      |   6 ++
- src/main.c                     | 140 +++++++++++++++++++++++++++++++--
+ src/main.c                     | 140 +++++++++++++++++++++++--
  src/netconf.c                  |   2 +-
- src/netconf_server.c           | 129 ++++++++++++++++++++++++++++++
- src/netconf_server.h           |   9 +++
+ src/netconf_server.c           | 184 +++++++++++++++++++++++++++++++++
+ src/netconf_server.h           |   9 ++
  src/netconf_server_ssh.c       |   4 +-
- 12 files changed, 414 insertions(+), 23 deletions(-)
+ 12 files changed, 469 insertions(+), 23 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..44355b0 100644
@@ -549,10 +549,10 @@ index 0bbe112..7bd3840 100644
                          parent = lys_parent(elem);
                          while (parent && (parent->nodetype != LYS_GROUPING)) {
 diff --git a/src/netconf_server.c b/src/netconf_server.c
-index 4645f84..43b2c63 100644
+index 4645f84..a9b3887 100644
 --- a/src/netconf_server.c
 +++ b/src/netconf_server.c
-@@ -339,6 +339,111 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
+@@ -339,6 +339,166 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
      return SR_ERR_OK;
  }
  
@@ -562,44 +562,99 @@ index 4645f84..43b2c63 100644
 +np2srv_m_plane_marking(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
 +        sr_event_t UNUSED(event), uint32_t UNUSED(request_id), void *UNUSED(private_data))
 +{
-+    uint8_t MAX_CLIENT_COUNT = 5;
-+    char *addr[MAX_CLIENT_COUNT];
-+    uint8_t dscp[MAX_CLIENT_COUNT];
-+    uint8_t count = 0;
-+    nc_server_get_address_and_dscp_list(addr, dscp, &count, MAX_CLIENT_COUNT);
++    #define MAX_NAME_LEN 255
++    #define MAX_CLIENT_COUNT 50
++    #define MAX_XPATH_LEN 1024
++    char *client_addr[MAX_CLIENT_COUNT];
++    uint8_t client_dscp[MAX_CLIENT_COUNT];
++    uint8_t client_count = 0;
++    sr_val_t *if_names = NULL;
++    static size_t name_count = 0;
++    static char if_name[MAX_CLIENT_COUNT][MAX_NAME_LEN] = {0};
++    int rc = SR_ERR_OK;
 +
-+    for (uint8_t i = 0; i < count; i++)
++
++    // get list of all IP and corresponding DSCP configured by M-plane
++    nc_server_get_address_and_dscp_list(client_addr, client_dscp, &client_count, MAX_CLIENT_COUNT);
++
++    // lets now fetch all the ietf-interfaces configured by QNCM
++    // we need to fetch this only first time, as this will never change
++    if (if_name[0][0] == 0)
 +    {
-+        ERR("addr: %s, dscp: %d", addr[i], dscp[i]);
-+        char addr_xpath[1024];
-+        strcpy(addr_xpath, xpath);
-+        strcat(addr_xpath, "/../ietf-ip:address[ietf-ip:ip=\"");
-+        strcat(addr_xpath, addr[i]);
-+        strcat(addr_xpath, "\"]/../m-plane-marking");
-+        ERR("addr xpath: %s", addr_xpath);
-+        uint8_t new_dscp = dscp[i];
-+        sr_val_t *value = NULL;
-+        int rc = sr_get_item(session, xpath, 1000, &value);
++        rc = sr_get_items(session, "/ietf-interfaces:interfaces/ietf-interfaces:interface/ietf-interfaces:name", 1000, 0, &if_names, &name_count);
 +        if (rc != SR_ERR_OK)
 +        {
-+            return rc;
++            goto error;
 +        }
-+        new_dscp = value->data.uint8_val;
-+        ERR("addr: %s, new dscp %d", addr[i], new_dscp);
-+        if (dscp[i] == new_dscp)
++
++        for (uint8_t name_idx = 0; name_idx < name_count; name_idx++)
 +        {
-+            ERR("no need to update socket");
++            VRB("interface: %s", if_names[name_idx].data.string_val);
++            snprintf(if_name[name_idx], MAX_NAME_LEN, "%s", if_names[name_idx].data.string_val);
 +        }
-+        rc = nc_server_update_m_plane_marking(addr[i], new_dscp);
-+        free(addr[i]);
-+        if (rc != 0)
-+        {
-+            ERR("failed to update the dscp");
-+        }
-+        
++        sr_free_values(if_names, name_count);
 +    }
 +
-+    return SR_ERR_OK;
++    for (uint8_t name_idx = 0; name_idx < name_count; name_idx++)
++    {
++        // get list of IPs for each interface
++        char ip_addr_xpath[MAX_XPATH_LEN];
++        sr_val_t *ips = NULL;
++        size_t ip_count = 0;
++        snprintf(ip_addr_xpath, MAX_XPATH_LEN, "/ietf-interfaces:interfaces/ietf-interfaces:interface[name=\"%s\"]/ietf-ip:ipv4/ietf-ip:address/ietf-ip:ip", if_name[name_idx]);
++        VRB("ip addr xpath: %s", ip_addr_xpath);
++        rc = sr_get_items(session, ip_addr_xpath, 1000, 0, &ips, &ip_count);
++        if (rc != SR_ERR_OK)
++        {
++            goto error;
++        }
++
++        for (uint8_t ip_idx = 0; ip_idx < ip_count; ip_idx++)
++        {
++            VRB("interface: %s -> ip: %s", if_name[name_idx], ips[ip_idx].data.string_val);
++            // check if this IP matches with any of the configured IP for mplane
++            for (uint8_t client_idx = 0; client_idx < client_count; client_idx++)
++            {
++                if (!strcmp(ips[ip_idx].data.string_val, client_addr[client_idx]))
++                {
++                    char dscp_xpath[MAX_XPATH_LEN];
++                    snprintf(dscp_xpath, MAX_XPATH_LEN, "/ietf-interfaces:interfaces/ietf-interfaces:interface[name=\"%s\"]/ietf-ip:ipv4/o-ran-interfaces:m-plane-marking", if_name[name_idx]);
++                    VRB("dscp xpath: %s", dscp_xpath);
++                    uint8_t new_dscp = client_dscp[client_idx];
++                    sr_val_t *marking = NULL;
++                    rc = sr_get_item(session, dscp_xpath, 1000, &marking);
++                    if (rc != SR_ERR_OK)
++                    {
++                        sr_free_values(ips, ip_count);
++                        goto error;
++                    }
++                    new_dscp = marking->data.uint8_val;
++                    if (client_dscp[client_idx] == new_dscp)
++                    {
++                        VRB("no need to update socket");
++                    }
++                    else
++                    {
++                        VRB("addr: %s, old dscp: %d, new dscp: %d", client_addr[client_idx], client_dscp[client_idx], new_dscp);
++                        rc = nc_server_update_m_plane_marking(client_addr[client_idx], new_dscp);
++                        if (rc != 0)
++                        {
++                            ERR("failed to update the dscp");
++                        }
++                    }
++                    sr_free_val(marking);
++                }
++            }
++        }
++        sr_free_values(ips, ip_count);
++    }
++
++    error:
++        for (uint8_t i = 0; i < client_count; i++)
++        {
++            free(client_addr[i]);
++        }
++        return rc;
 +}
 +
 +/* /o-ran-operations:operational-info/re-call-home-no-ssh-timer */
@@ -664,7 +719,7 @@ index 4645f84..43b2c63 100644
  /* /ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ * /tcp-client-parameters */
  int
  np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
-@@ -382,6 +487,30 @@ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUS
+@@ -382,6 +542,30 @@ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUS
                      return SR_ERR_INTERNAL;
                  }
              }
