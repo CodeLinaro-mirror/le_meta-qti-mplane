@@ -1,7 +1,7 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 
 Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
-SPDX-License-Identifier: BSD-3-Clause-Clear 
+SPDX-License-Identifier: BSD-3-Clause-Clear
 
 From 3737a207a2f3f3209c72c26d27c3ccde6a83c9ff Mon Sep 17 00:00:00 2001
 From: opensource<quic_username@quicinc.com>
@@ -41,15 +41,15 @@ support for mplane dscp change
 Signed-off-by: Vishal Tripathi <quic_vishalt@quicinc.com>
 
 ---
- src/io.c                 |   6 ++
+ src/io.c                 |   6 +
  src/session_client.c     |  44 +++++++-
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
- src/session_p.h          |  12 ++-
- src/session_server.c     | 220 ++++++++++++++++++++++++++++++++++++++-
- src/session_server.h     |  53 ++++++++++
- src/session_server_ch.h  |  35 +++++++
- 8 files changed, 365 insertions(+), 11 deletions(-)
+ src/session_p.h          |  12 +-
+ src/session_server.c     | 236 ++++++++++++++++++++++++++++++++++++++-
+ src/session_server.h     |  53 +++++++++
+ src/session_server_ch.h  |  35 ++++++
+ 8 files changed, 381 insertions(+), 11 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..1dc6155 100644
@@ -251,7 +251,7 @@ index 4e1346e..d5ad175 100644
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..821250d 100644
+index 6025f39..95e1203 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
 @@ -36,13 +36,18 @@
@@ -386,7 +386,7 @@ index 6025f39..821250d 100644
  API int
  nc_server_ch_client_endpt_enable_keepalives(const char *client_name, const char *endpt_name, int enable)
  {
-@@ -3075,10 +3164,19 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
+@@ -3075,10 +3164,27 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
      struct timespec ts_cur;
      char *ip_host;
  
@@ -398,7 +398,15 @@ index 6025f39..821250d 100644
 +
 +    // shifting by 2 as DSCP mask is (1111 1100)
 +    int dscp = endpt->dscp << 2;
-+    if (setsockopt(sock, IPPROTO_IP, IP_TOS, &dscp, sizeof dscp ) == -1) {
++    int level = IPPROTO_IP;
++    int option = IP_TOS;
++    if (strstr(ip_host, "::") != NULL)
++    {
++        VRB("this is ipv6 protocol");
++        level = IPPROTO_IPV6;
++        option = IPV6_TCLASS;
++    }
++    if (setsockopt(sock, level, option, &dscp, sizeof dscp ) == -1) {
 +        ERR("Could not set IP_TOS socket option (%s).", strerror(errno));
 +        goto fail;
 +    }
@@ -407,7 +415,7 @@ index 6025f39..821250d 100644
      /* no need to store the socket as pending any longer */
      endpt->sock_pending = -1;
  
-@@ -3275,6 +3373,7 @@ nc_ch_client_thread(void *arg)
+@@ -3275,6 +3381,7 @@ nc_ch_client_thread(void *arg)
      struct nc_ch_client_thread_arg *data = (struct nc_ch_client_thread_arg *)arg;
      NC_MSG_TYPE msgtype;
      uint8_t cur_attempts = 0;
@@ -415,7 +423,7 @@ index 6025f39..821250d 100644
      uint16_t next_endpt_index;
      char *cur_endpt_name = NULL;
      struct nc_ch_endpt *cur_endpt;
-@@ -3298,6 +3397,9 @@ nc_ch_client_thread(void *arg)
+@@ -3298,6 +3405,9 @@ nc_ch_client_thread(void *arg)
          msgtype = nc_connect_ch_endpt(cur_endpt, &session);
  
          if (msgtype == NC_MSG_HELLO) {
@@ -425,7 +433,7 @@ index 6025f39..821250d 100644
              /* UNLOCK */
              nc_server_ch_client_unlock(client);
  
-@@ -3362,7 +3464,33 @@ nc_ch_client_thread(void *arg)
+@@ -3362,7 +3472,33 @@ nc_ch_client_thread(void *arg)
              nc_server_ch_client_unlock(client);
  
              /* session was not created */
@@ -460,7 +468,7 @@ index 6025f39..821250d 100644
  
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
-@@ -3506,3 +3634,89 @@ nc_session_is_callhome(const struct nc_session *session)
+@@ -3506,3 +3642,97 @@ nc_session_is_callhome(const struct nc_session *session)
  
      return 0;
  }
@@ -508,13 +516,21 @@ index 6025f39..821250d 100644
 +            {
 +                if (!strcmp(server_opts.ch_clients[client_count].ch_endpts[endpt_count].local_address, addr))
 +                {
-+                    ERR("endpnt name: %s", server_opts.ch_clients[client_count].ch_endpts[endpt_count].name);
-+                    ERR("endpnt sock: %d", server_opts.ch_clients[client_count].ch_endpts[endpt_count].sock);
++                    VRB("endpnt name: %s", server_opts.ch_clients[client_count].ch_endpts[endpt_count].name);
++                    VRB("endpnt sock: %d", server_opts.ch_clients[client_count].ch_endpts[endpt_count].sock);
 +                    server_opts.ch_clients[client_count].ch_endpts[endpt_count].dscp = value;
 +                    int sock = server_opts.ch_clients[client_count].ch_endpts[endpt_count].sock;
 +                    if (sock)
 +                    {
-+                        if (setsockopt(sock, IPPROTO_IP, IP_TOS, &dscp, sizeof dscp ) == -1)
++                        int level = IPPROTO_IP;
++                        int option = IP_TOS;
++                        if (strstr(addr, "::") != NULL)
++                        {
++                            VRB("this is ipv6 protocol");
++                            level = IPPROTO_IPV6;
++                            option = IPV6_TCLASS;
++                        }
++                        if (setsockopt(sock, level, option, &dscp, sizeof dscp ) == -1)
 +                        {
 +                            ERR("Could not set IP_TOS socket option (%s).", strerror(errno));
 +                            return -1;
