@@ -38,19 +38,19 @@ Update dscp on netopeer2 socket
 Signed-off-by: Vishal Tripathi <quic_vishalt@quicinc.com>
 
 ---
- CMakeLists.txt                 |  36 +++++++
- CMakeModules/FindSysrepo.cmake |  12 ++-
+ CMakeLists.txt                 |  36 ++++++
+ CMakeModules/FindSysrepo.cmake |  12 +-
  scripts/merge_hostkey.sh       |   2 +-
  scripts/setup.sh               |  11 --
  src/common.c                   |   9 ++
- src/log.c                      |  77 ++++++++++++++
- src/log.h                      |   6 ++
- src/main.c                     | 140 +++++++++++++++++++++++--
+ src/log.c                      |  77 +++++++++++++
+ src/log.h                      |   6 +
+ src/main.c                     | 140 +++++++++++++++++++++++-
  src/netconf.c                  |   2 +-
- src/netconf_server.c           | 184 +++++++++++++++++++++++++++++++++
+ src/netconf_server.c           | 193 +++++++++++++++++++++++++++++++++
  src/netconf_server.h           |   9 ++
  src/netconf_server_ssh.c       |   4 +-
- 12 files changed, 469 insertions(+), 23 deletions(-)
+ 12 files changed, 478 insertions(+), 23 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..44355b0 100644
@@ -549,10 +549,10 @@ index 0bbe112..7bd3840 100644
                          parent = lys_parent(elem);
                          while (parent && (parent->nodetype != LYS_GROUPING)) {
 diff --git a/src/netconf_server.c b/src/netconf_server.c
-index 4645f84..a9b3887 100644
+index 4645f84..9a285cf 100644
 --- a/src/netconf_server.c
 +++ b/src/netconf_server.c
-@@ -339,6 +339,166 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
+@@ -339,6 +339,175 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
      return SR_ERR_OK;
  }
  
@@ -572,6 +572,15 @@ index 4645f84..a9b3887 100644
 +    static size_t name_count = 0;
 +    static char if_name[MAX_CLIENT_COUNT][MAX_NAME_LEN] = {0};
 +    int rc = SR_ERR_OK;
++    char *ip_type = NULL;
++    if (strstr(xpath, "ipv4"))
++    {
++        ip_type = "ipv4";
++    }
++    else
++    {
++        ip_type = "ipv6";
++    }
 +
 +
 +    // get list of all IP and corresponding DSCP configured by M-plane
@@ -601,7 +610,7 @@ index 4645f84..a9b3887 100644
 +        char ip_addr_xpath[MAX_XPATH_LEN];
 +        sr_val_t *ips = NULL;
 +        size_t ip_count = 0;
-+        snprintf(ip_addr_xpath, MAX_XPATH_LEN, "/ietf-interfaces:interfaces/ietf-interfaces:interface[name=\"%s\"]/ietf-ip:ipv4/ietf-ip:address/ietf-ip:ip", if_name[name_idx]);
++        snprintf(ip_addr_xpath, MAX_XPATH_LEN, "/ietf-interfaces:interfaces/ietf-interfaces:interface[name=\"%s\"]/ietf-ip:%s/ietf-ip:address/ietf-ip:ip", if_name[name_idx], ip_type);
 +        VRB("ip addr xpath: %s", ip_addr_xpath);
 +        rc = sr_get_items(session, ip_addr_xpath, 1000, 0, &ips, &ip_count);
 +        if (rc != SR_ERR_OK)
@@ -618,7 +627,7 @@ index 4645f84..a9b3887 100644
 +                if (!strcmp(ips[ip_idx].data.string_val, client_addr[client_idx]))
 +                {
 +                    char dscp_xpath[MAX_XPATH_LEN];
-+                    snprintf(dscp_xpath, MAX_XPATH_LEN, "/ietf-interfaces:interfaces/ietf-interfaces:interface[name=\"%s\"]/ietf-ip:ipv4/o-ran-interfaces:m-plane-marking", if_name[name_idx]);
++                    snprintf(dscp_xpath, MAX_XPATH_LEN, "/ietf-interfaces:interfaces/ietf-interfaces:interface[name=\"%s\"]/ietf-ip:%s/o-ran-interfaces:m-plane-marking", if_name[name_idx], ip_type);
 +                    VRB("dscp xpath: %s", dscp_xpath);
 +                    uint8_t new_dscp = client_dscp[client_idx];
 +                    sr_val_t *marking = NULL;
@@ -719,7 +728,7 @@ index 4645f84..a9b3887 100644
  /* /ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ * /tcp-client-parameters */
  int
  np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
-@@ -382,6 +542,30 @@ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUS
+@@ -382,6 +551,30 @@ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUS
                      return SR_ERR_INTERNAL;
                  }
              }
