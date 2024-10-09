@@ -1,6 +1,6 @@
-From dc7e1f24e0c2dd2a0e5f0f0a55e068f5b014e49a Mon Sep 17 00:00:00 2001
-From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Fri, 12 Jul 2024 10:23:56 +0200
+From 17194ba979a8badf9e561284da709ee397320f5b Mon Sep 17 00:00:00 2001
+From: Romain Chaumontet <rchaumon@qti.qualcomm.com>
+Date: Thu, 26 Sep 2024 15:56:43 +0200
 Subject: [PATCH] MPlane-required changes.
 
 Allow all versions when reading server capabilities. O-RAN modules
@@ -41,10 +41,10 @@ only if no clients is connected
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
  src/session_p.h          |  12 +-
- src/session_server.c     | 260 ++++++++++++++++++++++++++++++++++++++-
+ src/session_server.c     | 255 ++++++++++++++++++++++++++++++++++++++-
  src/session_server.h     |  53 ++++++++
  src/session_server_ch.h  |  35 ++++++
- 8 files changed, 403 insertions(+), 13 deletions(-)
+ 8 files changed, 398 insertions(+), 13 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..1dc6155 100644
@@ -246,7 +246,7 @@ index 4e1346e..d5ad175 100644
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..62adfc8 100644
+index 6025f39..d58e406 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
 @@ -31,18 +31,28 @@
@@ -436,7 +436,7 @@ index 6025f39..62adfc8 100644
      uint16_t next_endpt_index;
      char *cur_endpt_name = NULL;
      struct nc_ch_endpt *cur_endpt;
-@@ -3298,15 +3412,26 @@ nc_ch_client_thread(void *arg)
+@@ -3298,14 +3412,24 @@ nc_ch_client_thread(void *arg)
          msgtype = nc_connect_ch_endpt(cur_endpt, &session);
 
          if (msgtype == NC_MSG_HELLO) {
@@ -448,8 +448,7 @@ index 6025f39..62adfc8 100644
 
 -            VRB("Call Home client \"%s\" session %u established.", data->client_name, session->id);
 +            VRB(
-+                "Call Home client \"%s\" session %u established.",
-+                "Number of client connected; %d",
++                "Call Home client \"%s\" session %u established. Number of client connected: %d",
 +                data->client_name,
 +                session->id,
 +                ru_controller_connection_counter);
@@ -457,15 +456,14 @@ index 6025f39..62adfc8 100644
                  goto cleanup;
              }
 -            VRB("Call Home client \"%s\" session terminated, reconnecting...", data->client_name);
-
++
 +            --ru_controller_connection_counter;
-+            VRB("Call Home client \"%s\" session terminated,",
-+                " number of client still connected: %d. reconnecting...",
++            VRB("Call Home client \"%s\" session terminated, number of client still connected: %d. reconnecting...",
 +                data->client_name);
+
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
-             if (!client) {
-@@ -3362,7 +3487,38 @@ nc_ch_client_thread(void *arg)
+@@ -3362,7 +3486,37 @@ nc_ch_client_thread(void *arg)
              nc_server_ch_client_unlock(client);
 
              /* session was not created */
@@ -491,7 +489,6 @@ index 6025f39..62adfc8 100644
 +                    max_call_home_attempts);
 +                nc_server_ch_exceeded_clb clb =
 +                    nc_server_get_call_home_exeeded_cb();
-+
 +                if (ru_controller_connection_counter != 0)
 +                {
 +                    VRB("Already session connected. Do not call reset.");
@@ -505,7 +502,7 @@ index 6025f39..62adfc8 100644
 
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
-@@ -3506,3 +3662,97 @@ nc_session_is_callhome(const struct nc_session *session)
+@@ -3506,3 +3660,94 @@ nc_session_is_callhome(const struct nc_session *session)
 
      return 0;
  }
@@ -589,7 +586,7 @@ index 6025f39..62adfc8 100644
 +        for (uint8_t j = 0; j < server_opts.ch_clients[i].ch_endpt_count; j++)
 +        {
 +            addr[*count] = calloc(1, MAX_ADDR_LEN);
-+            memcpy(addr[*count], server_opts.ch_clients[i].ch_endpts[j].local_address, strlen(server_opts.ch_clients[i].ch_endpts[j].local_address));
++            memcpy(addr[*count], server_opts.ch_clients[i].ch_endpts[j].local_address, MAX_ADDR_LEN);
 +            dscp[*count] = server_opts.ch_clients[i].ch_endpts[j].dscp;
 +            (*count)++;
 +            if (*count == max_count)
@@ -597,9 +594,6 @@ index 6025f39..62adfc8 100644
 +                return 0;
 +            }
 +        }
-+
-+        //memcpy(addr[i], server_opts.ch_clients[*count].ch_endpts[0].local_address, sizeof(server_opts.ch_clients[*count].ch_endpts[0].local_address));
-+        //dscp[i] = server_opts.ch_clients[*count].ch_endpts[0].dscp;
 +    }
 +    return 0;
 +}
