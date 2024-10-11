@@ -1,7 +1,10 @@
-From 17194ba979a8badf9e561284da709ee397320f5b Mon Sep 17 00:00:00 2001
-From: Romain Chaumontet <rchaumon@qti.qualcomm.com>
-Date: Thu, 26 Sep 2024 15:56:43 +0200
-Subject: [PATCH] MPlane-required changes.
+This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
+Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+From 96d10007387e53c8c3d488d4f1bcab120ed6c825 Mon Sep 17 00:00:00 2001
+From: opensource<quic_username@quicinc.com>
+Date: Fri, 11 Oct 2024 07:17:22 +0200
+Subject: [PATCH] Mplane-required changes.
 
 Allow all versions when reading server capabilities. O-RAN modules
 use YANG version 1.1 instead of 1.0, they would be left out with the old
@@ -246,7 +249,7 @@ index 4e1346e..d5ad175 100644
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..d58e406 100644
+index 6025f39..47dd4c9 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
 @@ -31,18 +31,28 @@
@@ -260,7 +263,7 @@ index 6025f39..d58e406 100644
  #include "session_server_ch.h"
 
 +#define DEFAULT_RE_CALL_HOME_NO_SSH_TIMER 60
-+#define MAX_CALL_HOME_ATTEMPTS_OFF 255
++#define MAX_CALL_HOME_ATTEMPTS_OFF 20
 +
 +#ifdef __STDC_NO_ATOMICS__
 +# error Atomics are required
