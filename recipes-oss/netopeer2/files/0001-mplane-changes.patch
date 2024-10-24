@@ -6,7 +6,7 @@ From: opensource<quic_username@quicinc.com>
 Date: Mon, 19 Aug 2024 15:46:51 +0200
 Subject: [PATCH] Mplane changes
 
-read authorized_keys from /data/mplane/.ssh
+read authorized_keys from /etc/mplane/.ssh
 
 make sysrepo operations timeout to be configurable
 
@@ -304,7 +304,7 @@ index 66262e4..b98e337 100644
 +
  #endif /* NP2SRV_LOG_H_ */
 diff --git a/src/main.c b/src/main.c
-index d1abcdb..d11c1aa 100644
+index d1abcdb..7cc30d0 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -39,6 +39,7 @@
@@ -468,7 +468,7 @@ index d1abcdb..d11c1aa 100644
 +        {
 +            WRN("Error opening the file.\n");
 +        }
-+        uint32_t timeoutValue = 0;
++        uint32_t timeoutValue = 120;
 +        // Read lines from the file
 +        while (fgets(line, MAX_LINE_LENGTH, file) != NULL)
 +        {
@@ -822,7 +822,7 @@ index cd56bd4..a12aa2c 100644
 +
  #endif /* NP2SRV_NETCONF_SERVER_H_ */
 diff --git a/src/netconf_server_ssh.c b/src/netconf_server_ssh.c
-index 1cfd3fa..e45397a 100644
+index 1cfd3fa..f040d99 100644
 --- a/src/netconf_server_ssh.c
 +++ b/src/netconf_server_ssh.c
 @@ -98,7 +98,7 @@ np2srv_pubkey_auth_cb(const struct nc_session *session, ssh_key key, void *UNUSE
@@ -830,7 +830,7 @@ index 1cfd3fa..e45397a 100644
 
      /* check any authorized keys */
 -    r = asprintf(&line, NP2SRV_SSH_AUTHORIZED_KEYS_PATTERN, NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
-+    r = asprintf(&line, "/data/mplane/radio/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
++    r = asprintf(&line, "/etc/mplane/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
      if (r == -1) {
          EMEM;
          line = NULL;
