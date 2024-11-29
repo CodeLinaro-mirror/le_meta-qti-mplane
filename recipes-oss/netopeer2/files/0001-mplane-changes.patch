@@ -36,20 +36,22 @@ Send success-vote to ab-updater if the libsetsuccessvoter library is found.
 Update dscp on netopeer2 socket
 
 refactor create subscription with upstream BUGFIX
+
+Add timestamp to np2 logs
 ---
  CMakeLists.txt                 |  36 ++++++
  CMakeModules/FindSysrepo.cmake |  12 +-
  scripts/merge_hostkey.sh       |   2 +-
  scripts/setup.sh               |  11 --
  src/common.c                   |   9 ++
- src/log.c                      |  77 +++++++++++++
+ src/log.c                      | 110 +++++++++++++++++--
  src/log.h                      |   6 +
  src/main.c                     | 140 +++++++++++++++++++++++-
  src/netconf.c                  |  96 ++++++++++++----
  src/netconf_server.c           | 193 +++++++++++++++++++++++++++++++++
  src/netconf_server.h           |   9 ++
  src/netconf_server_ssh.c       |   4 +-
- 12 files changed, 552 insertions(+), 43 deletions(-)
+ 12 files changed, 578 insertions(+), 50 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..44355b0 100644
@@ -187,10 +189,25 @@ index 02ef4ba..27e08e2 100644
 
  error:
 diff --git a/src/log.c b/src/log.c
-index 4260108..e99a38d 100644
+index 4260108..6b49b47 100644
 --- a/src/log.c
 +++ b/src/log.c
-@@ -28,6 +28,11 @@
+@@ -17,6 +17,7 @@
+ #include <stdarg.h>
+ #include <string.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <sys/types.h>
+ #include <syslog.h>
+ #include <unistd.h>
+@@ -24,10 +25,17 @@
+ #include <nc_server.h>
+ #include <libyang/libyang.h>
+ #include <sysrepo.h>
+-
++#include <time.h>
++#include <sys/time.h>
++#include <pthread.h>
  #include "common.h"
  #include "log.h"
 
@@ -202,10 +219,55 @@ index 4260108..e99a38d 100644
  volatile uint8_t np2_verbose_level;
  uint8_t np2_libssh_verbose_level;
  uint8_t np2_sr_verbose_level;
-@@ -68,6 +73,23 @@ np2log(int priority, const char *src, const char *fmt, ...)
-             break;
-         }
+@@ -44,7 +52,23 @@ np2log(int priority, const char *src, const char *fmt, ...)
+     va_end(ap);
 
+     if (np2_stderr_log) {
+-        format = malloc(11 + strlen(fmt) + 2);
++        pthread_t thread_id = pthread_self();
++        char timestamp[30]; // Buffer for the timestamp with microseconds
++        struct timeval tv;
++        struct tm * timeinfo;
++
++        // Get the current time
++        gettimeofday(&tv, NULL);
++        timeinfo = localtime(&tv.tv_sec);
++
++        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
++        snprintf(
++            timestamp + strlen(timestamp),
++            sizeof(timestamp) - strlen(timestamp),
++            ".%06ld", tv.tv_usec); // add microseconds
++
++        size_t bufferSize = snprintf(NULL, 0, "[%s] [tid: %lu] [UNK]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt) + 1;
++        format = malloc(bufferSize);
+         if (!format) {
+             fprintf(stderr, "[ERR]: Memory allocation failed (%s:%d), src: %s, fmt: %s\n", __FILE__, __LINE__, src, fmt);
+             return;
+@@ -52,21 +76,38 @@ np2log(int priority, const char *src, const char *fmt, ...)
+
+         switch (priority) {
+         case LOG_ERR:
+-            sprintf(format, "[ERR]: %s: %s\n", src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [ERR]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
+             break;
+         case LOG_WARNING:
+-            sprintf(format, "[WRN]: %s: %s\n", src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [WRN]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
+             break;
+         case LOG_INFO:
+-            sprintf(format, "[INF]: %s: %s\n", src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [INF]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
+             break;
+         case LOG_DEBUG:
+-            sprintf(format, "[DBG]: %s: %s\n", src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [DBG]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
++            break;
++        default:
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [UNK]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
++            break;
++        }
++
 +#ifdef DIAG_LOGGING
 +        switch (priority) {
 +        case LOG_ERR:
@@ -216,17 +278,17 @@ index 4260108..e99a38d 100644
 +            break;
 +        case LOG_INFO:
 +            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_MED, "NP2: %s", format);
-+            break;
-+        default:
+             break;
+         default:
+-            sprintf(format, "[UNK]: %s: %s\n", src, fmt);
 +            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_LOW, "NP2: %s", format);
-+            break;
-+        }
+             break;
+         }
 +#endif
-+
+
          va_start(ap, fmt);
          vfprintf(stderr, format, ap);
-         va_end(ap);
-@@ -236,6 +258,61 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
+@@ -236,6 +277,61 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
      free(buf);
  }
 
