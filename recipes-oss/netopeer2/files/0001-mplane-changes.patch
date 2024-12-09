@@ -1,12 +1,12 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
-Copyright (c) Qualcomm Innovation Center, Inc. All rights reserved.
+Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
 From 919f3cd214909eb176e10f67880eeb95198e79cc Mon Sep 17 00:00:00 2001
 From: opensource<quic_username@quicinc.com>
 Date: Mon, 19 Aug 2024 15:46:51 +0200
 Subject: [PATCH] Mplane changes
 
-read authorized_keys from /data/mplane/.ssh
+read authorized_keys from /etc/mplane/.ssh
 
 make sysrepo operations timeout to be configurable
 
@@ -35,21 +35,23 @@ Send success-vote to ab-updater if the libsetsuccessvoter library is found.
 
 Update dscp on netopeer2 socket
 
-Check if module is in xpath before add subscription
+refactor create subscription with upstream BUGFIX
+
+Add timestamp to np2 logs
 ---
  CMakeLists.txt                 |  36 ++++++
  CMakeModules/FindSysrepo.cmake |  12 +-
  scripts/merge_hostkey.sh       |   2 +-
  scripts/setup.sh               |  11 --
  src/common.c                   |   9 ++
- src/log.c                      |  77 +++++++++++++
+ src/log.c                      | 110 +++++++++++++++++--
  src/log.h                      |   6 +
  src/main.c                     | 140 +++++++++++++++++++++++-
- src/netconf.c                  |  27 ++++-
+ src/netconf.c                  |  96 ++++++++++++----
  src/netconf_server.c           | 193 +++++++++++++++++++++++++++++++++
  src/netconf_server.h           |   9 ++
  src/netconf_server_ssh.c       |   4 +-
- 12 files changed, 503 insertions(+), 23 deletions(-)
+ 12 files changed, 578 insertions(+), 50 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..44355b0 100644
@@ -187,10 +189,25 @@ index 02ef4ba..27e08e2 100644
 
  error:
 diff --git a/src/log.c b/src/log.c
-index 4260108..e99a38d 100644
+index 4260108..6b49b47 100644
 --- a/src/log.c
 +++ b/src/log.c
-@@ -28,6 +28,11 @@
+@@ -17,6 +17,7 @@
+ #include <stdarg.h>
+ #include <string.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <sys/types.h>
+ #include <syslog.h>
+ #include <unistd.h>
+@@ -24,10 +25,17 @@
+ #include <nc_server.h>
+ #include <libyang/libyang.h>
+ #include <sysrepo.h>
+-
++#include <time.h>
++#include <sys/time.h>
++#include <pthread.h>
  #include "common.h"
  #include "log.h"
 
@@ -202,10 +219,55 @@ index 4260108..e99a38d 100644
  volatile uint8_t np2_verbose_level;
  uint8_t np2_libssh_verbose_level;
  uint8_t np2_sr_verbose_level;
-@@ -68,6 +73,23 @@ np2log(int priority, const char *src, const char *fmt, ...)
-             break;
-         }
+@@ -44,7 +52,23 @@ np2log(int priority, const char *src, const char *fmt, ...)
+     va_end(ap);
 
+     if (np2_stderr_log) {
+-        format = malloc(11 + strlen(fmt) + 2);
++        pthread_t thread_id = pthread_self();
++        char timestamp[30]; // Buffer for the timestamp with microseconds
++        struct timeval tv;
++        struct tm * timeinfo;
++
++        // Get the current time
++        gettimeofday(&tv, NULL);
++        timeinfo = localtime(&tv.tv_sec);
++
++        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
++        snprintf(
++            timestamp + strlen(timestamp),
++            sizeof(timestamp) - strlen(timestamp),
++            ".%06ld", tv.tv_usec); // add microseconds
++
++        size_t bufferSize = snprintf(NULL, 0, "[%s] [tid: %lu] [UNK]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt) + 1;
++        format = malloc(bufferSize);
+         if (!format) {
+             fprintf(stderr, "[ERR]: Memory allocation failed (%s:%d), src: %s, fmt: %s\n", __FILE__, __LINE__, src, fmt);
+             return;
+@@ -52,21 +76,38 @@ np2log(int priority, const char *src, const char *fmt, ...)
+
+         switch (priority) {
+         case LOG_ERR:
+-            sprintf(format, "[ERR]: %s: %s\n", src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [ERR]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
+             break;
+         case LOG_WARNING:
+-            sprintf(format, "[WRN]: %s: %s\n", src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [WRN]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
+             break;
+         case LOG_INFO:
+-            sprintf(format, "[INF]: %s: %s\n", src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [INF]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
+             break;
+         case LOG_DEBUG:
+-            sprintf(format, "[DBG]: %s: %s\n", src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [DBG]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
++            break;
++        default:
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [UNK]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
++            break;
++        }
++
 +#ifdef DIAG_LOGGING
 +        switch (priority) {
 +        case LOG_ERR:
@@ -216,17 +278,17 @@ index 4260108..e99a38d 100644
 +            break;
 +        case LOG_INFO:
 +            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_MED, "NP2: %s", format);
-+            break;
-+        default:
+             break;
+         default:
+-            sprintf(format, "[UNK]: %s: %s\n", src, fmt);
 +            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_LOW, "NP2: %s", format);
-+            break;
-+        }
+             break;
+         }
 +#endif
-+
+
          va_start(ap, fmt);
          vfprintf(stderr, format, ap);
-         va_end(ap);
-@@ -236,6 +258,61 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
+@@ -236,6 +277,61 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
      free(buf);
  }
 
@@ -304,7 +366,7 @@ index 66262e4..b98e337 100644
 +
  #endif /* NP2SRV_LOG_H_ */
 diff --git a/src/main.c b/src/main.c
-index d1abcdb..d11c1aa 100644
+index d1abcdb..7cc30d0 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -39,6 +39,7 @@
@@ -468,7 +530,7 @@ index d1abcdb..d11c1aa 100644
 +        {
 +            WRN("Error opening the file.\n");
 +        }
-+        uint32_t timeoutValue = 0;
++        uint32_t timeoutValue = 120;
 +        // Read lines from the file
 +        while (fgets(line, MAX_LINE_LENGTH, file) != NULL)
 +        {
@@ -535,10 +597,66 @@ index d1abcdb..d11c1aa 100644
      return ret;
  }
 diff --git a/src/netconf.c b/src/netconf.c
-index 0bbe112..beba201 100644
+index 0bbe112..dcc82ab 100644
 --- a/src/netconf.c
 +++ b/src/netconf.c
-@@ -850,6 +850,8 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
+@@ -26,7 +26,6 @@
+
+ #include <sysrepo.h>
+ #include <libyang/libyang.h>
+-
+ #include "common.h"
+ #include "log.h"
+ #include "netconf_acm.h"
+@@ -837,11 +836,46 @@ cleanup:
+     return rc;
+ }
+
++static int
++np2srv_rpc_subscribe_append_str(const char *str, char **ret)
++{
++    void *mem = NULL;
++    int len;
++
++    if (!ret)
++    {
++        EINT;
++        return SR_ERR_INTERNAL;
++    }
++
++    if (!*ret) {
++        *ret = strdup(str);
++        if (!*ret) {
++            EMEM;
++            return SR_ERR_NOMEM;
++        }
++    } else {
++        len = strlen(*ret);
++        // Realloc ret
++        mem = realloc(*ret, len + strlen(str) + 1);
++        if (!mem) {
++            EMEM;
++            return SR_ERR_NOMEM;
++        }
++        *ret = mem;
++
++        // Adding str at the end of ret
++        snprintf(*ret + len, strlen(str) + 1, "%s", str);
++    }
++
++    return SR_ERR_OK;
++}
++
+ int
+ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path), const struct lyd_node *input,
+         sr_event_t UNUSED(event), uint32_t UNUSED(request_id), struct lyd_node *UNUSED(output), void *UNUSED(private_data))
+ {
+-    struct ly_set *nodeset;
++    struct ly_set *nodeset, *modset = NULL;
+     const struct lys_module *ly_mod;
+     struct lys_node *root, *next, *elem, *parent;
+     struct nc_session *ncs;
+@@ -850,6 +884,8 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
      time_t start = 0, stop = 0;
      int rc = SR_ERR_OK, i, len, filter_count = 0;
      uint32_t idx;
@@ -547,11 +665,82 @@ index 0bbe112..beba201 100644
 
      /* find this NETCONF session */
      for (i = 0; (ncs = nc_ps_get_session(np2srv.nc_ps, i)); ++i) {
-@@ -925,13 +927,36 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
-             rc = SR_ERR_OK;
+@@ -867,8 +903,9 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
+     nodeset = lyd_find_path(input, "stream");
+     stream = ((struct lyd_node_leaf_list *)nodeset->set.d[0])->value_str;
+     ly_set_free(nodeset);
++    VRB("Stream %s", stream);
+
+-    /* filter */
++    /* filter, join all into one xpath */
+     nodeset = lyd_find_path(input, "filter");
+     if (nodeset->number) {
+         if (op_filter_create(nodeset->set.d[0], &filters, &filter_count)) {
+@@ -876,28 +913,38 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
+             goto cleanup;
+         }
+
+-        /* join all filters into one xpath */
++        /* all selection filters first */
+         for (i = 0; i < filter_count; ++i) {
++
++            /* put all selection filters into parentheses */
+             if (!xp) {
+-                xp = strdup(filters[0]);
+-                if (!xp) {
+-                    EMEM;
+-                    rc = SR_ERR_NOMEM;
++                if ((rc = np2srv_rpc_subscribe_append_str("(", &xp))) {
++                    goto cleanup;
++                }
++
++                if ((rc = np2srv_rpc_subscribe_append_str(filters[i], &xp))) {
+                     goto cleanup;
+                 }
+             } else {
+-                len = strlen(xp);
+-                mem = realloc(xp, len + 5 + strlen(filters[i]) + 1);
+-                if (!mem) {
+-                    EMEM;
+-                    rc = SR_ERR_NOMEM;
++                if ((rc = np2srv_rpc_subscribe_append_str(" | ", &xp))) {
++                    goto cleanup;
++                }
++
++                if ((rc = np2srv_rpc_subscribe_append_str(filters[i], &xp))) {
+                     goto cleanup;
+                 }
+-                xp = mem;
+-                sprintf(xp + len, " and %s", filters[i]);
++            }
++        }
++
++        if (xp) {
++            /* finish parentheses */
++            if ((rc = np2srv_rpc_subscribe_append_str(")", &xp))) {
++                goto cleanup;
+             }
+         }
+     }
++
++    VRB("Filters %s", xp);
+     ly_set_free(nodeset);
+
+     /* start time */
+@@ -919,21 +966,21 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
+
+     /* sysrepo API */
+     if (!strcmp(stream, "NETCONF")) {
+-        /* subscribe to all modules with notifications */
++        /* collect all modules with notifications */
++        modset = ly_set_new();
+         idx = 0;
+         while ((ly_mod = ly_ctx_get_module_iter(lyd_node_module(input)->ctx, &idx))) {
+-            rc = SR_ERR_OK;
              LY_TREE_FOR(ly_mod->data, root) {
                  LY_TREE_DFS_BEGIN(root, next, elem) {
 -                    if (elem->nodetype == LYS_NOTIF) {
++                    // Adding the lys_is_disabled from upstream (no specific commit)
 +                    if (elem->nodetype == LYS_NOTIF && !lys_is_disabled(elem, 0)) {
                          /* check that we are not in a grouping */
                          parent = lys_parent(elem);
@@ -559,32 +748,41 @@ index 0bbe112..beba201 100644
                              parent = lys_parent(parent);
                          }
                          if (!parent) {
-+
-+                            if (xp)
-+                            {
-+                                // If there is an xpath, does not subscribe
-+                                // if the module name is not the same.
-+                                colon_pos = strchr(xp, ':');
-+                                if (colon_pos)
-+                                {
-+                                    prefix = strndup(xp + 1, colon_pos - xp - 1);
-+                                }
-+                                if (prefix)
-+                                {
-+                                    if (strcmp(prefix,ly_mod->name))
-+                                    {
-+                                        free(prefix);
-+                                        prefix = NULL;
-+                                        break;
-+                                    }
-+                                    free(prefix);
-+                                    prefix = NULL;
-+                                }
-+
-+                            }
-                             rc = sr_event_notif_subscribe_tree(nc_session_get_data(ncs), ly_mod->name, xp, start, stop,
-                                     np2srv_ntf_new_cb, ncs, np2srv.sr_notif_sub ? SR_SUBSCR_CTX_REUSE : 0, &np2srv.sr_notif_sub);
+-                            rc = sr_event_notif_subscribe_tree(nc_session_get_data(ncs), ly_mod->name, xp, start, stop,
+-                                    np2srv_ntf_new_cb, ncs, np2srv.sr_notif_sub ? SR_SUBSCR_CTX_REUSE : 0, &np2srv.sr_notif_sub);
++                            ly_set_add(modset, (void *)ly_mod, LY_SET_OPT_USEASLIST);
                              break;
+                         }
+                     }
+@@ -943,6 +990,13 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
+                    break;
+                 }
+             }
++        }
++
++        /* subscribe to all the modules */
++        for (idx = 0; idx < modset->number; ++idx) {
++            ly_mod = modset->set.g[idx];
++            rc = sr_event_notif_subscribe_tree(nc_session_get_data(ncs), ly_mod->name, xp, start, stop, np2srv_ntf_new_cb,
++                    ncs, np2srv.sr_notif_sub ? SR_SUBSCR_CTX_REUSE : 0, &np2srv.sr_notif_sub);
+             if (rc != SR_ERR_OK) {
+                 goto cleanup;
+             }
+@@ -956,13 +1010,13 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
+     }
+
+     /* success */
+-
+ cleanup:
+     for (i = 0; i < filter_count; ++i) {
+         free(filters[i]);
+     }
+     free(filters);
+     free(xp);
++    ly_set_free(modset);
+     if (ncs && rc) {
+         nc_session_set_notif_status(ncs, 0);
+     }
 diff --git a/src/netconf_server.c b/src/netconf_server.c
 index 4645f84..9a285cf 100644
 --- a/src/netconf_server.c
@@ -822,7 +1020,7 @@ index cd56bd4..a12aa2c 100644
 +
  #endif /* NP2SRV_NETCONF_SERVER_H_ */
 diff --git a/src/netconf_server_ssh.c b/src/netconf_server_ssh.c
-index 1cfd3fa..e45397a 100644
+index 1cfd3fa..f040d99 100644
 --- a/src/netconf_server_ssh.c
 +++ b/src/netconf_server_ssh.c
 @@ -98,7 +98,7 @@ np2srv_pubkey_auth_cb(const struct nc_session *session, ssh_key key, void *UNUSE
@@ -830,7 +1028,7 @@ index 1cfd3fa..e45397a 100644
 
      /* check any authorized keys */
 -    r = asprintf(&line, NP2SRV_SSH_AUTHORIZED_KEYS_PATTERN, NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
-+    r = asprintf(&line, "/data/mplane/radio/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
++    r = asprintf(&line, "/etc/mplane/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
      if (r == -1) {
          EMEM;
          line = NULL;

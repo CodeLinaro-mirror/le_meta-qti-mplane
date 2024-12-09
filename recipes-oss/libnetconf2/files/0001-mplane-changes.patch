@@ -1,7 +1,10 @@
-From 17194ba979a8badf9e561284da709ee397320f5b Mon Sep 17 00:00:00 2001
-From: Romain Chaumontet <rchaumon@qti.qualcomm.com>
-Date: Thu, 26 Sep 2024 15:56:43 +0200
-Subject: [PATCH] MPlane-required changes.
+This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
+Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+From 96d10007387e53c8c3d488d4f1bcab120ed6c825 Mon Sep 17 00:00:00 2001
+From: opensource<quic_username@quicinc.com>
+Date: Fri, 11 Oct 2024 07:17:22 +0200
+Subject: [PATCH] Mplane-required changes.
 
 Allow all versions when reading server capabilities. O-RAN modules
 use YANG version 1.1 instead of 1.0, they would be left out with the old
@@ -41,10 +44,10 @@ only if no clients is connected
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
  src/session_p.h          |  12 +-
- src/session_server.c     | 255 ++++++++++++++++++++++++++++++++++++++-
+ src/session_server.c     | 254 ++++++++++++++++++++++++++++++++++++++-
  src/session_server.h     |  53 ++++++++
  src/session_server_ch.h  |  35 ++++++
- 8 files changed, 398 insertions(+), 13 deletions(-)
+ 8 files changed, 397 insertions(+), 13 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..1dc6155 100644
@@ -246,7 +249,7 @@ index 4e1346e..d5ad175 100644
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..d58e406 100644
+index 6025f39..9ceecbc 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
 @@ -31,18 +31,28 @@
@@ -260,7 +263,7 @@ index 6025f39..d58e406 100644
  #include "session_server_ch.h"
 
 +#define DEFAULT_RE_CALL_HOME_NO_SSH_TIMER 60
-+#define MAX_CALL_HOME_ATTEMPTS_OFF 255
++#define DEFAULT_MAX_CALL_HOME_ATTEMPTS 20
 +
 +#ifdef __STDC_NO_ATOMICS__
 +# error Atomics are required
@@ -275,7 +278,7 @@ index 6025f39..d58e406 100644
 -    .ch_client_lock = PTHREAD_RWLOCK_INITIALIZER
 +    .ch_client_lock = PTHREAD_RWLOCK_INITIALIZER,
 +    .re_call_home_no_ssh_timer = DEFAULT_RE_CALL_HOME_NO_SSH_TIMER,
-+    .max_call_home_attempts = MAX_CALL_HOME_ATTEMPTS_OFF
++    .max_call_home_attempts = DEFAULT_MAX_CALL_HOME_ATTEMPTS
  };
 
  static nc_rpc_clb global_rpc_clb = NULL;
@@ -463,7 +466,7 @@ index 6025f39..d58e406 100644
 
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
-@@ -3362,7 +3486,37 @@ nc_ch_client_thread(void *arg)
+@@ -3362,7 +3486,36 @@ nc_ch_client_thread(void *arg)
              nc_server_ch_client_unlock(client);
 
              /* session was not created */
@@ -480,8 +483,7 @@ index 6025f39..d58e406 100644
 +
 +            ++total_attempts;
 +            uint8_t max_call_home_attempts = nc_server_get_max_call_home_attempts();
-+            if (max_call_home_attempts != MAX_CALL_HOME_ATTEMPTS_OFF &&
-+                total_attempts >= max_call_home_attempts)
++            if (total_attempts >= max_call_home_attempts)
 +            {
 +                // if the maximum number of attempts has been made, exit
 +                // function and O-RAN will not try to connect to this endpoint
@@ -502,7 +504,7 @@ index 6025f39..d58e406 100644
 
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
-@@ -3506,3 +3660,94 @@ nc_session_is_callhome(const struct nc_session *session)
+@@ -3506,3 +3659,94 @@ nc_session_is_callhome(const struct nc_session *session)
 
      return 0;
  }
