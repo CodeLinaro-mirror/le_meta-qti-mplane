@@ -2,7 +2,7 @@ This patch file is from Qualcomm Innovation Center, Inc. and is provided under t
 Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
 From 919f3cd214909eb176e10f67880eeb95198e79cc Mon Sep 17 00:00:00 2001
-From: opensource<quic_username@quicinc.com>
+From: Romain Chaumontet <quic_rchaumon@quicinc.com>
 Date: Mon, 19 Aug 2024 15:46:51 +0200
 Subject: [PATCH] Mplane changes
 
@@ -38,6 +38,8 @@ Update dscp on netopeer2 socket
 refactor create subscription with upstream BUGFIX
 
 Add timestamp to np2 logs
+
+Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
 ---
  CMakeLists.txt                 |  36 ++++++
  CMakeModules/FindSysrepo.cmake |  12 +-
