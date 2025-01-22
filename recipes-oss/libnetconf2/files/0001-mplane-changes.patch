@@ -1,9 +1,9 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
-From 96d10007387e53c8c3d488d4f1bcab120ed6c825 Mon Sep 17 00:00:00 2001
-From: opensource<quic_username@quicinc.com>
-Date: Fri, 11 Oct 2024 07:17:22 +0200
+From 1b9675f882a673617767fd8296fb3da1c43da460 Mon Sep 17 00:00:00 2001
+From: Romain Chaumontet <quic_rchaumon@quicinc.com>
+Date: Wed, 22 Jan 2025 17:00:34 +0100
 Subject: [PATCH] Mplane-required changes.
 
 Allow all versions when reading server capabilities. O-RAN modules
@@ -37,17 +37,19 @@ have been made
 support for mplane dscp change
 
 Callback notification when max call home attemps have been made is done
-only if no clients is connected
+only if no clients are not available for re-call-home procedure.
+
+Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
 ---
  src/io.c                 |   6 +
- src/session_client.c     |  44 ++++++-
+ src/session_client.c     |  44 +++++-
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
  src/session_p.h          |  12 +-
- src/session_server.c     | 254 ++++++++++++++++++++++++++++++++++++++-
+ src/session_server.c     | 286 ++++++++++++++++++++++++++++++++++++++-
  src/session_server.h     |  53 ++++++++
- src/session_server_ch.h  |  35 ++++++
- 8 files changed, 397 insertions(+), 13 deletions(-)
+ src/session_server_ch.h  |  35 +++++
+ 8 files changed, 427 insertions(+), 15 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..1dc6155 100644
@@ -249,7 +251,7 @@ index 4e1346e..d5ad175 100644
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..9ceecbc 100644
+index 6025f39..abdb72c 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
 @@ -31,18 +31,28 @@
@@ -423,11 +425,13 @@ index 6025f39..9ceecbc 100644
      /* no need to store the socket as pending any longer */
      endpt->sock_pending = -1;
 
-@@ -3269,12 +3380,15 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
+@@ -3269,12 +3380,17 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
      return ret;
  }
 
-+unsigned _Atomic ru_controller_connection_counter = ATOMIC_VAR_INIT(0);
++// Counter of number of ru_controller libnetconf will try the re-call-home
++//  procedure
++unsigned _Atomic ru_controller_counter = ATOMIC_VAR_INIT(0);
 +
  static void *
  nc_ch_client_thread(void *arg)
@@ -439,72 +443,130 @@ index 6025f39..9ceecbc 100644
      uint16_t next_endpt_index;
      char *cur_endpt_name = NULL;
      struct nc_ch_endpt *cur_endpt;
-@@ -3298,14 +3412,24 @@ nc_ch_client_thread(void *arg)
+@@ -3283,11 +3399,20 @@ nc_ch_client_thread(void *arg)
+     uint32_t client_id;
+     time_t reconnect_in;
+
++    nc_server_ch_exceeded_clb clb = nc_server_get_call_home_exeeded_cb();
++
++    // Add this ru_controller to the counter
++    ru_controller_counter++;
++
++    uint16_t re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
++    uint8_t max_call_home_attempts = nc_server_get_max_call_home_attempts();
++
+     /* LOCK */
+     client = nc_server_ch_client_with_endpt_lock(data->client_name);
+     if (!client) {
+         goto cleanup;
+     }
++
+     client_id = client->id;
+
+     cur_endpt = &client->ch_endpts[0];
+@@ -3298,14 +3423,24 @@ nc_ch_client_thread(void *arg)
          msgtype = nc_connect_ch_endpt(cur_endpt, &session);
 
          if (msgtype == NC_MSG_HELLO) {
 +            /* Connection was made, clear the attempt counter */
 +            total_attempts = 0;
-+            ++ru_controller_connection_counter;
              /* UNLOCK */
              nc_server_ch_client_unlock(client);
 
 -            VRB("Call Home client \"%s\" session %u established.", data->client_name, session->id);
 +            VRB(
-+                "Call Home client \"%s\" session %u established. Number of client connected: %d",
++                "Call Home client \"%s\" session %u established."
++                " Number of client still available for call-home attempt: %d",
 +                data->client_name,
 +                session->id,
-+                ru_controller_connection_counter);
++                ru_controller_counter);
              if (nc_server_ch_client_thread_session_cond_wait(session, data)) {
                  goto cleanup;
              }
 -            VRB("Call Home client \"%s\" session terminated, reconnecting...", data->client_name);
 +
-+            --ru_controller_connection_counter;
-+            VRB("Call Home client \"%s\" session terminated, number of client still connected: %d. reconnecting...",
++            VRB(
++                "Call Home client \"%s\" session terminated",
 +                data->client_name);
 
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
-@@ -3362,7 +3486,36 @@ nc_ch_client_thread(void *arg)
+@@ -3356,14 +3491,16 @@ nc_ch_client_thread(void *arg)
+                 /* just get a random index */
+                 next_endpt_index = rand() % client->ch_endpt_count;
+             }
+-
+         } else {
++
++            VRB(
++                "Number of attempt done: %u, over: %u",
++                total_attempts,
++                max_call_home_attempts);
+             /* UNLOCK */
              nc_server_ch_client_unlock(client);
 
              /* session was not created */
 -            usleep(NC_CH_ENDPT_FAIL_WAIT * 1000);
-+
-+            uint16_t re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
-+
-+            if (re_call_home_no_ssh_timer == 0)
-+            {
-+                // if the value is 0, exiting the thread and
-+                // O-RAN will not try to connect to this client.
-+                goto cleanup;
-+            }
-+
-+            ++total_attempts;
-+            uint8_t max_call_home_attempts = nc_server_get_max_call_home_attempts();
-+            if (total_attempts >= max_call_home_attempts)
-+            {
-+                // if the maximum number of attempts has been made, exit
-+                // function and O-RAN will not try to connect to this endpoint
-+                VRB("Giving up, max_call_home_attempts = %u",
-+                    max_call_home_attempts);
-+                nc_server_ch_exceeded_clb clb =
-+                    nc_server_get_call_home_exeeded_cb();
-+                if (ru_controller_connection_counter != 0)
-+                {
-+                    VRB("Already session connected. Do not call reset.");
-+                }
-+                else if (clb)
-+                    clb();
-+
-+                goto cleanup;
-+            }
-+            usleep(re_call_home_no_ssh_timer * NC_CH_ENDPT_FAIL_WAIT * 1000);
-
+-
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
-@@ -3506,3 +3659,94 @@ nc_session_is_callhome(const struct nc_session *session)
+             if (!client) {
+@@ -3404,10 +3541,54 @@ nc_ch_client_thread(void *arg)
+         cur_endpt = &client->ch_endpts[next_endpt_index];
+         free(cur_endpt_name);
+         cur_endpt_name = strdup(cur_endpt->name);
++
++        // Update value because it may have been changed by DU
++        re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
++        if (re_call_home_no_ssh_timer == 0)
++        {
++            // if the value is 0, exiting the thread and
++            // O-RAN will not try to connect to this client.
++            goto check_ru_controller;
++        }
++
++        // Check if max call home attempts is reached
++        //
++        max_call_home_attempts = nc_server_get_max_call_home_attempts();
++        if (total_attempts >= max_call_home_attempts)
++        {
++            // if the maximum number of attempts has been made, exit
++            // function and O-RAN will not try to connect to this endpoint
++            VRB("Giving up, max_call_home_attempts = %u",
++                max_call_home_attempts);
++            goto check_ru_controller;
++        }
++
++        // Update the value if it changed in the configuration
++        re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
++        // Sleep before retrying the call-home
++        usleep(re_call_home_no_ssh_timer * NC_CH_ENDPT_FAIL_WAIT * 1000);
++        total_attempts++;
++    }
++
++check_ru_controller:
++    // Checking if there is still other ru controller available, call reset if
++    //      not
++    if (ru_controller_counter - 1 != 0)
++    {
++        VRB(
++            "Still %u clients to continue doing the re-call-home "
++            "attempt. Do not call reset",
++            ru_controller_counter);
++    }
++    else if (clb)
++    {
++        clb();
+     }
+
+ cleanup:
++    ru_controller_counter--;
+     VRB("Call Home client \"%s\" thread exit.", data->client_name);
++
+     free(cur_endpt_name);
+     free(data->client_name);
+     free(data);
+@@ -3506,3 +3687,94 @@ nc_session_is_callhome(const struct nc_session *session)
 
      return 0;
  }
