@@ -1,7 +1,7 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
-From 1b9675f882a673617767fd8296fb3da1c43da460 Mon Sep 17 00:00:00 2001
+From ccc209265a364cb1d30bbf8cdd8a9de446553f85 Mon Sep 17 00:00:00 2001
 From: Romain Chaumontet <quic_rchaumon@quicinc.com>
 Date: Wed, 22 Jan 2025 17:00:34 +0100
 Subject: [PATCH] Mplane-required changes.
@@ -39,9 +39,11 @@ support for mplane dscp change
 Callback notification when max call home attemps have been made is done
 only if no clients are not available for re-call-home procedure.
 
+Print all packets sent and received
+
 Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
 ---
- src/io.c                 |   6 +
+ src/io.c                 |  10 +-
  src/session_client.c     |  44 +++++-
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
@@ -49,12 +51,30 @@ Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
  src/session_server.c     | 286 ++++++++++++++++++++++++++++++++++++++-
  src/session_server.h     |  53 ++++++++
  src/session_server_ch.h  |  35 +++++
- 8 files changed, 427 insertions(+), 15 deletions(-)
+ 8 files changed, 429 insertions(+), 17 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
-index 252a8b4..1dc6155 100644
+index 252a8b4..a75fe1a 100644
 --- a/src/io.c
 +++ b/src/io.c
+@@ -452,7 +452,7 @@ nc_read_msg_io(struct nc_session *session, int io_timeout, struct lyxml_elem **d
+     nc_session_io_unlock(session, __func__);
+     io_locked = 0;
+
+-    DBG("Session %u: received message:\n%s\n", session->id, msg);
++    VRB("Session %u: received message:\n%s\n", session->id, msg);
+
+     /* build XML tree */
+     *data = lyxml_parse_mem(session->ctx, msg, LYXML_PARSE_NOMIXEDCONTENT);
+@@ -740,7 +740,7 @@ nc_write(struct nc_session *session, const void *buf, size_t count)
+         return -1;
+     }
+
+-    DBG("Session %u: sending message:\n%.*s\n", session->id, count, buf);
++    VRB("Session %u: sending message:\n%.*s\n", session->id, count, buf);
+
+     do {
+         interrupted = 0;
 @@ -998,6 +998,12 @@ nc_write_error(struct wclb_arg *arg, struct nc_server_error *err, const char *pr
          pref_len = strlen(prefix);
      }
