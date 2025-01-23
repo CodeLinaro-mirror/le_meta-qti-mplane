@@ -1,10 +1,7 @@
-This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
-Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
-SPDX-License-Identifier: BSD-3-Clause-Clear
-From ccc209265a364cb1d30bbf8cdd8a9de446553f85 Mon Sep 17 00:00:00 2001
-From: Romain Chaumontet <quic_rchaumon@quicinc.com>
+From 9d331a6fd9164f819d28259d44b61eaa89a77e8d Mon Sep 17 00:00:00 2001
+From: Romain Chaumontet <rchaumon@qti.qualcomm.com>
 Date: Wed, 22 Jan 2025 17:00:34 +0100
-Subject: [PATCH] Mplane-required changes.
+Subject: [PATCH] <quic_rchaumon@quicinc.com>
 
 Allow all versions when reading server capabilities. O-RAN modules
 use YANG version 1.1 instead of 1.0, they would be left out with the old
@@ -17,7 +14,8 @@ fix send complete rpc reply msg to NetConf client and MplaneApp
 
 re-call-home-no-ssh-time feature support
 
-Forward error message without adding any xml tags
+Forward error message without adding any xml tags when the error is not
+coming from sysrepo
 
 Adding default value of re_call_home_no_ssh_timer
 
@@ -43,7 +41,7 @@ Print all packets sent and received
 
 Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
 ---
- src/io.c                 |  10 +-
+ src/io.c                 |  17 ++-
  src/session_client.c     |  44 +++++-
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
@@ -51,10 +49,10 @@ Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
  src/session_server.c     | 286 ++++++++++++++++++++++++++++++++++++++-
  src/session_server.h     |  53 ++++++++
  src/session_server_ch.h  |  35 +++++
- 8 files changed, 429 insertions(+), 17 deletions(-)
+ 8 files changed, 436 insertions(+), 17 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
-index 252a8b4..a75fe1a 100644
+index 252a8b4..d082b8e 100644
 --- a/src/io.c
 +++ b/src/io.c
 @@ -452,7 +452,7 @@ nc_read_msg_io(struct nc_session *session, int io_timeout, struct lyxml_elem **d
@@ -75,15 +73,22 @@ index 252a8b4..a75fe1a 100644
 
      do {
          interrupted = 0;
-@@ -998,6 +998,12 @@ nc_write_error(struct wclb_arg *arg, struct nc_server_error *err, const char *pr
+@@ -998,6 +998,19 @@ nc_write_error(struct wclb_arg *arg, struct nc_server_error *err, const char *pr
          pref_len = strlen(prefix);
      }
 
++    VRB("Error message content: %s", err->message);
++    const char* substr = "<error>";
++
++    if (strstr(err->message, substr) != NULL)
++    {
 +    // returning from here as we just need to forward the error messgage
 +    // received from RU to DU without adding any tag (rpc-error/error-type etc)
++        nc_write_clb((void *)arg, err->message, strlen(err->message), 0);
++        return;
++    }
 +
-+    nc_write_clb((void *)arg, err->message, strlen(err->message), 0);
-+    return;
++    WRN("Rpc-error not formated yet");
 +
      nc_write_error_elem(arg, "rpc-error", 9, prefix, pref_len, 1, 0);
 
