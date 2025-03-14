@@ -1,11 +1,9 @@
-From 9d331a6fd9164f819d28259d44b61eaa89a77e8d Mon Sep 17 00:00:00 2001
-From: Romain Chaumontet <rchaumon@qti.qualcomm.com>
-Date: Wed, 22 Jan 2025 17:00:34 +0100
-Subject: [PATCH] <quic_rchaumon@quicinc.com>
-
-Allow all versions when reading server capabilities. O-RAN modules
-use YANG version 1.1 instead of 1.0, they would be left out with the old
-LYS_VERSION_1.
+From 142636cce280cceae1f4f2c2e951d4f28138016e Mon Sep 17 00:00:00 2001
+From: Rishi Singh <quic_rishikan@quicinc.com>
+Date: Wed, 5 Mar 2025 15:20:59 +0100
+Subject: [PATCH] Allow all versions when reading server capabilities. O-RAN
+ modules use YANG version 1.1 instead of 1.0, they would be left out with the
+ old LYS_VERSION_1.
 
 Allow the mplane generated message ids in addition to internally
 generated message id.
@@ -39,17 +37,21 @@ only if no clients are not available for re-call-home procedure.
 
 Print all packets sent and received
 
+Fix ru controller availability counter
+
 Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
+
+Signed-off-by: Rishi Singh <quic_rishikan@quicinc.com>
 ---
  src/io.c                 |  17 ++-
  src/session_client.c     |  44 +++++-
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
  src/session_p.h          |  12 +-
- src/session_server.c     | 286 ++++++++++++++++++++++++++++++++++++++-
- src/session_server.h     |  53 ++++++++
+ src/session_server.c     | 313 ++++++++++++++++++++++++++++++++++++++-
+ src/session_server.h     |  54 +++++++
  src/session_server_ch.h  |  35 +++++
- 8 files changed, 436 insertions(+), 17 deletions(-)
+ 8 files changed, 463 insertions(+), 18 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..d082b8e 100644
@@ -58,25 +60,25 @@ index 252a8b4..d082b8e 100644
 @@ -452,7 +452,7 @@ nc_read_msg_io(struct nc_session *session, int io_timeout, struct lyxml_elem **d
      nc_session_io_unlock(session, __func__);
      io_locked = 0;
-
+ 
 -    DBG("Session %u: received message:\n%s\n", session->id, msg);
 +    VRB("Session %u: received message:\n%s\n", session->id, msg);
-
+ 
      /* build XML tree */
      *data = lyxml_parse_mem(session->ctx, msg, LYXML_PARSE_NOMIXEDCONTENT);
 @@ -740,7 +740,7 @@ nc_write(struct nc_session *session, const void *buf, size_t count)
          return -1;
      }
-
+ 
 -    DBG("Session %u: sending message:\n%.*s\n", session->id, count, buf);
 +    VRB("Session %u: sending message:\n%.*s\n", session->id, count, buf);
-
+ 
      do {
          interrupted = 0;
 @@ -998,6 +998,19 @@ nc_write_error(struct wclb_arg *arg, struct nc_server_error *err, const char *pr
          pref_len = strlen(prefix);
      }
-
+ 
 +    VRB("Error message content: %s", err->message);
 +    const char* substr = "<error>";
 +
@@ -91,7 +93,7 @@ index 252a8b4..d082b8e 100644
 +    WRN("Rpc-error not formated yet");
 +
      nc_write_error_elem(arg, "rpc-error", 9, prefix, pref_len, 1, 0);
-
+ 
      nc_write_error_elem(arg, "error-type", 10, prefix, pref_len, 1, 0);
 diff --git a/src/session_client.c b/src/session_client.c
 index 941f872..62e128c 100644
@@ -167,7 +169,7 @@ index 941f872..62e128c 100644
      int sock = sock_pending ? *sock_pending : -1;
 @@ -1379,7 +1415,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
          }
-
+ 
          for (res = res_list; res != NULL; res = res->ai_next) {
 -            sock = _non_blocking_connect(timeout, sock_pending, res, ka);
 +            sock = _non_blocking_connect(timeout, sock_pending, res, ka, local_address, local_port);
@@ -181,7 +183,7 @@ index 941f872..62e128c 100644
 -        sock = _non_blocking_connect(timeout, sock_pending, NULL, ka);
 +        sock = _non_blocking_connect(timeout, sock_pending, NULL, ka, local_address, local_port);
      }
-
+ 
      return sock;
 diff --git a/src/session_client_ssh.c b/src/session_client_ssh.c
 index 7097e8e..02dbd29 100644
@@ -189,7 +191,7 @@ index 7097e8e..02dbd29 100644
 +++ b/src/session_client_ssh.c
 @@ -1575,7 +1575,7 @@ _nc_connect_libssh(ssh_session ssh_session, struct ly_ctx *ctx, struct nc_keepal
          ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_HOST, host);
-
+ 
          /* create and connect socket */
 -        sock = nc_sock_connect(host, port, -1, ka, NULL, &ip_host);
 +        sock = nc_sock_connect(host, port, NULL, 0, -1, ka, NULL, &ip_host);
@@ -198,7 +200,7 @@ index 7097e8e..02dbd29 100644
              goto fail;
 @@ -1725,7 +1725,7 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
      ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_TIMEOUT, &timeout);
-
+ 
      /* create and assign communication socket */
 -    sock = nc_sock_connect(host, port, -1, &client_opts.ka, NULL, &ip_host);
 +    sock = nc_sock_connect(host, port, NULL, 0, -1, &client_opts.ka, NULL, &ip_host);
@@ -211,7 +213,7 @@ index b548dcb..91baeb8 100644
 +++ b/src/session_client_tls.c
 @@ -622,7 +622,7 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
      }
-
+ 
      /* create and assign socket */
 -    sock = nc_sock_connect(host, port, -1, &client_opts.ka, NULL, &ip_host);
 +    sock = nc_sock_connect(host, port, NULL, 0, -1, &client_opts.ka, NULL, &ip_host);
@@ -227,9 +229,9 @@ index 4e1346e..d5ad175 100644
  #include "session.h"
  #include "messages_client.h"
 +#include "session_server.h"
-
+ 
  #ifdef NC_ENABLED_SSH
-
+ 
 @@ -261,6 +262,8 @@ struct nc_server_opts {
              NC_TRANSPORT_IMPL ti;
              const char *address;
@@ -255,7 +257,7 @@ index 4e1346e..d5ad175 100644
 +    atomic_uint_least16_t re_call_home_no_ssh_timer;
 +    atomic_uint_least8_t max_call_home_attempts;
 +    nc_server_ch_exceeded_clb max_callhome_clb;
-
+ 
      /* Atomic IDs */
      ATOMIC_UINT32_T new_session_id;
 @@ -553,13 +561,15 @@ NC_MSG_TYPE nc_handshake_io(struct nc_session *session);
@@ -272,11 +274,11 @@ index 4e1346e..d5ad175 100644
   */
 -int nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepalives *ka, int *sock_pending, char **ip_host);
 +int nc_sock_connect(const char *host, uint16_t port, const char *local_address, uint16_t local_port, int timeout, struct nc_keepalives *ka, int *sock_pending, char **ip_host);
-
+ 
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..abdb72c 100644
+index 6025f39..2410f80 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
 @@ -31,18 +31,28 @@
@@ -284,11 +286,11 @@ index 6025f39..abdb72c 100644
  #include <signal.h>
  #include <pwd.h>
 +#include <stdatomic.h>
-
+ 
  #include "libnetconf.h"
  #include "session_server.h"
  #include "session_server_ch.h"
-
+ 
 +#define DEFAULT_RE_CALL_HOME_NO_SSH_TIMER 60
 +#define DEFAULT_MAX_CALL_HOME_ATTEMPTS 20
 +
@@ -307,7 +309,7 @@ index 6025f39..abdb72c 100644
 +    .re_call_home_no_ssh_timer = DEFAULT_RE_CALL_HOME_NO_SSH_TIMER,
 +    .max_call_home_attempts = DEFAULT_MAX_CALL_HOME_ATTEMPTS
  };
-
+ 
  static nc_rpc_clb global_rpc_clb = NULL;
 @@ -2390,6 +2400,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
          for (i = 0; i < client->ch_endpt_count; ++i) {
@@ -328,7 +330,7 @@ index 6025f39..abdb72c 100644
 @@ -2779,6 +2791,60 @@ nc_server_ch_client_endpt_set_address(const char *client_name, const char *endpt
      return 0;
  }
-
+ 
 +API int
 +nc_server_ch_client_endpt_set_local_address(const char *client_name, const char *endpt_name, const char *address)
 +{
@@ -389,7 +391,7 @@ index 6025f39..abdb72c 100644
 @@ -2810,6 +2876,34 @@ nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_na
      return 0;
  }
-
+ 
 +API int
 +nc_server_ch_client_endpt_set_local_port(const char *client_name, const char *endpt_name, uint16_t port)
 +{
@@ -424,7 +426,7 @@ index 6025f39..abdb72c 100644
 @@ -3075,10 +3169,27 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
      struct timespec ts_cur;
      char *ip_host;
-
+ 
 -    sock = nc_sock_connect(endpt->address, endpt->port, 5, &endpt->ka, &endpt->sock_pending, &ip_host);
 +    sock = nc_sock_connect(endpt->address, endpt->port, endpt->local_address, endpt->local_port, 5, &endpt->ka, &endpt->sock_pending, &ip_host);
      if (sock < 0) {
@@ -449,14 +451,46 @@ index 6025f39..abdb72c 100644
 +    endpt->sock = sock;
      /* no need to store the socket as pending any longer */
      endpt->sock_pending = -1;
-
-@@ -3269,12 +3380,17 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
+ 
+@@ -3269,12 +3380,49 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
      return ret;
  }
-
+ 
 +// Counter of number of ru_controller libnetconf will try the re-call-home
 +//  procedure
-+unsigned _Atomic ru_controller_counter = ATOMIC_VAR_INIT(0);
++unsigned _Atomic g_ru_controller_counter = ATOMIC_VAR_INIT(0);
++pthread_mutex_t g_reset_callback_used_mutex = PTHREAD_MUTEX_INITIALIZER;
++
++int8_t check_call_reset()
++{
++    if (pthread_mutex_lock(&g_reset_callback_used_mutex) != 0)
++    {
++        ERR("Failed to lock mutex");
++        return -1;
++    }
++
++    nc_server_ch_exceeded_clb clb = nc_server_get_call_home_exeeded_cb();
++    atomic_fetch_sub(&g_ru_controller_counter, 1);
++    if (atomic_load(&g_ru_controller_counter) != 0)
++    {
++        VRB(
++            "Still %u clients to continue doing the re-call-home "
++            "attempt. Do not call reset",
++            atomic_load(&g_ru_controller_counter));
++    }
++    else if (clb)
++    {
++        VRB("No more clients available for re-call-home. Using the callback");
++        clb();
++    }
++    else
++    {
++        ERR("No reset callback provided");
++    }
++
++    pthread_mutex_unlock(&g_reset_callback_used_mutex);
++    return 0;
++}
 +
  static void *
  nc_ch_client_thread(void *arg)
@@ -468,14 +502,12 @@ index 6025f39..abdb72c 100644
      uint16_t next_endpt_index;
      char *cur_endpt_name = NULL;
      struct nc_ch_endpt *cur_endpt;
-@@ -3283,11 +3399,20 @@ nc_ch_client_thread(void *arg)
+@@ -3283,11 +3431,18 @@ nc_ch_client_thread(void *arg)
      uint32_t client_id;
      time_t reconnect_in;
-
-+    nc_server_ch_exceeded_clb clb = nc_server_get_call_home_exeeded_cb();
-+
+ 
 +    // Add this ru_controller to the counter
-+    ru_controller_counter++;
++    atomic_fetch_add(&g_ru_controller_counter, 1);
 +
 +    uint16_t re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
 +    uint8_t max_call_home_attempts = nc_server_get_max_call_home_attempts();
@@ -487,25 +519,26 @@ index 6025f39..abdb72c 100644
      }
 +
      client_id = client->id;
-
+ 
      cur_endpt = &client->ch_endpts[0];
-@@ -3298,14 +3423,24 @@ nc_ch_client_thread(void *arg)
+@@ -3298,22 +3453,35 @@ nc_ch_client_thread(void *arg)
          msgtype = nc_connect_ch_endpt(cur_endpt, &session);
-
+ 
          if (msgtype == NC_MSG_HELLO) {
 +            /* Connection was made, clear the attempt counter */
 +            total_attempts = 0;
              /* UNLOCK */
              nc_server_ch_client_unlock(client);
-
+ 
 -            VRB("Call Home client \"%s\" session %u established.", data->client_name, session->id);
 +            VRB(
 +                "Call Home client \"%s\" session %u established."
 +                " Number of client still available for call-home attempt: %d",
 +                data->client_name,
 +                session->id,
-+                ru_controller_counter);
++                atomic_load(&g_ru_controller_counter));
              if (nc_server_ch_client_thread_session_cond_wait(session, data)) {
++                atomic_fetch_sub(&g_ru_controller_counter, 1);
                  goto cleanup;
              }
 -            VRB("Call Home client \"%s\" session terminated, reconnecting...", data->client_name);
@@ -513,10 +546,33 @@ index 6025f39..abdb72c 100644
 +            VRB(
 +                "Call Home client \"%s\" session terminated",
 +                data->client_name);
-
+ 
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
-@@ -3356,14 +3491,16 @@ nc_ch_client_thread(void *arg)
+             if (!client) {
++                atomic_fetch_sub(&g_ru_controller_counter, 1);
+                 goto cleanup;
+             }
+             if (client->id != client_id) {
+                 nc_server_ch_client_unlock(client);
++                atomic_fetch_sub(&g_ru_controller_counter, 1);
+                 goto cleanup;
+             }
+ 
+@@ -3330,10 +3498,12 @@ nc_ch_client_thread(void *arg)
+                 /* LOCK */
+                 client = nc_server_ch_client_with_endpt_lock(data->client_name);
+                 if (!client) {
++                    atomic_fetch_sub(&g_ru_controller_counter, 1);
+                     goto cleanup;
+                 }
+                 if (client->id != client_id) {
+                     nc_server_ch_client_unlock(client);
++                    atomic_fetch_sub(&g_ru_controller_counter, 1);
+                     goto cleanup;
+                 }
+             }
+@@ -3356,21 +3526,25 @@ nc_ch_client_thread(void *arg)
                  /* just get a random index */
                  next_endpt_index = rand() % client->ch_endpt_count;
              }
@@ -529,25 +585,36 @@ index 6025f39..abdb72c 100644
 +                max_call_home_attempts);
              /* UNLOCK */
              nc_server_ch_client_unlock(client);
-
+ 
              /* session was not created */
 -            usleep(NC_CH_ENDPT_FAIL_WAIT * 1000);
 -
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
              if (!client) {
-@@ -3404,10 +3541,54 @@ nc_ch_client_thread(void *arg)
++                atomic_fetch_sub(&g_ru_controller_counter, 1);
+                 goto cleanup;
+             }
+             if (client->id != client_id) {
+                 nc_server_ch_client_unlock(client);
++                atomic_fetch_sub(&g_ru_controller_counter, 1);
+                 goto cleanup;
+             }
+ 
+@@ -3404,8 +3578,36 @@ nc_ch_client_thread(void *arg)
          cur_endpt = &client->ch_endpts[next_endpt_index];
          free(cur_endpt_name);
          cur_endpt_name = strdup(cur_endpt->name);
-+
+-    }
+ 
 +        // Update value because it may have been changed by DU
 +        re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
 +        if (re_call_home_no_ssh_timer == 0)
 +        {
 +            // if the value is 0, exiting the thread and
 +            // O-RAN will not try to connect to this client.
-+            goto check_ru_controller;
++            check_call_reset();
++            goto cleanup;
 +        }
 +
 +        // Check if max call home attempts is reached
@@ -557,9 +624,10 @@ index 6025f39..abdb72c 100644
 +        {
 +            // if the maximum number of attempts has been made, exit
 +            // function and O-RAN will not try to connect to this endpoint
++            check_call_reset();
 +            VRB("Giving up, max_call_home_attempts = %u",
 +                max_call_home_attempts);
-+            goto check_ru_controller;
++            goto cleanup;
 +        }
 +
 +        // Update the value if it changed in the configuration
@@ -568,31 +636,11 @@ index 6025f39..abdb72c 100644
 +        usleep(re_call_home_no_ssh_timer * NC_CH_ENDPT_FAIL_WAIT * 1000);
 +        total_attempts++;
 +    }
-+
-+check_ru_controller:
-+    // Checking if there is still other ru controller available, call reset if
-+    //      not
-+    if (ru_controller_counter - 1 != 0)
-+    {
-+        VRB(
-+            "Still %u clients to continue doing the re-call-home "
-+            "attempt. Do not call reset",
-+            ru_controller_counter);
-+    }
-+    else if (clb)
-+    {
-+        clb();
-     }
-
  cleanup:
-+    ru_controller_counter--;
      VRB("Call Home client \"%s\" thread exit.", data->client_name);
-+
      free(cur_endpt_name);
-     free(data->client_name);
-     free(data);
-@@ -3506,3 +3687,94 @@ nc_session_is_callhome(const struct nc_session *session)
-
+@@ -3506,3 +3708,98 @@ nc_session_is_callhome(const struct nc_session *session)
+ 
      return 0;
  }
 +
@@ -603,11 +651,15 @@ index 6025f39..abdb72c 100644
 +}
 +
 +API void
-+nc_server_update_max_call_home_attempts(uint8_t value,
-+                                        nc_server_ch_exceeded_clb clb)
++nc_server_update_max_call_home_clb(nc_server_ch_exceeded_clb clb)
++{
++    server_opts.max_callhome_clb = clb;
++}
++
++API void
++nc_server_update_max_call_home_attempts(uint8_t value)
 +{
 +    server_opts.max_call_home_attempts = value;
-+    server_opts.max_callhome_clb = clb;
 +}
 +
 +uint16_t
@@ -687,13 +739,13 @@ index 6025f39..abdb72c 100644
 +    return 0;
 +}
 diff --git a/src/session_server.h b/src/session_server.h
-index df7b075..f720a5d 100644
+index df7b075..de0c998 100644
 --- a/src/session_server.h
 +++ b/src/session_server.h
-@@ -904,6 +904,59 @@ int nc_session_get_notif_status(const struct nc_session *session);
+@@ -904,6 +904,60 @@ int nc_session_get_notif_status(const struct nc_session *session);
   */
  int nc_session_is_callhome(const struct nc_session *session);
-
+ 
 +/**
 + * @brief Updates the re_callhome_no_ssh_timer to the
 + * global session datastructure
@@ -709,8 +761,9 @@ index df7b075..f720a5d 100644
 + * @param[in] value maximum number of attempts
 + */
 +typedef void (*nc_server_ch_exceeded_clb)(void);
-+void nc_server_update_max_call_home_attempts(uint8_t value,
-+                                             nc_server_ch_exceeded_clb clb);
++
++void nc_server_update_max_call_home_clb(nc_server_ch_exceeded_clb clb);
++void nc_server_update_max_call_home_attempts(uint8_t value);
 +
 +/**
 + * @brief Get the re_callhome_no_ssh_timer
@@ -748,7 +801,7 @@ index df7b075..f720a5d 100644
 +nc_server_ch_exceeded_clb nc_server_get_call_home_exeeded_cb();
 +
  /**@} Server Session */
-
+ 
  #ifdef __cplusplus
 diff --git a/src/session_server_ch.h b/src/session_server_ch.h
 index c40ccc1..23360d2 100644
@@ -757,7 +810,7 @@ index c40ccc1..23360d2 100644
 @@ -114,6 +114,41 @@ int nc_server_ch_client_endpt_set_address(const char *client_name, const char *e
   */
  int nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_name, uint16_t port);
-
+ 
 +/**
 + * @brief Change Call Home client endpoint local binding address.
 + *
@@ -796,6 +849,6 @@ index c40ccc1..23360d2 100644
  /**
   * @brief Change Call Home client endpoint keepalives state. Affects only new connections.
   *
---
+-- 
 2.17.1
 
