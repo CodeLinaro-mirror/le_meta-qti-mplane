@@ -1,10 +1,12 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 Copyright (c) 2025 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
-From 81968a9a52f8dcecf2d4d9898cced8ee4c85aeb7 Mon Sep 17 00:00:00 2001
+From 1e08e4d3801cb140ef35dc401c821c0b74c6c6c4 Mon Sep 17 00:00:00 2001
 From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Wed, 26 Feb 2025 09:58:58 +0100
+Date: Thu, 27 Mar 2025 09:01:34 +0100
 Subject: [PATCH] Mplane changes
+
+Sysrepocfg systemcall will return the return value of the systemcall
 
 Increase SR_OPER_CB_TIMETOUT to 120s
 
@@ -22,13 +24,14 @@ Signed-off-by: Vishal Tripathi <quic_vishalt@quicinc.com>
  bindings/cpp/src/Session.hpp |   2 +-
  src/common.c                 | 356 ++++++++++++++++++++----
  src/common.h.in              |  65 ++++-
+ src/executables/sysrepocfg.c |   3 +
  src/modinfo.c                |   4 +-
  src/shm.h                    |  44 +--
  src/shm_ext.c                | 523 ++++++++---------------------------
  src/shm_main.c               |   8 +-
  src/shm_sub.c                |  12 +-
  src/sysrepo.c                |  15 +-
- 9 files changed, 512 insertions(+), 517 deletions(-)
+ 10 files changed, 515 insertions(+), 517 deletions(-)
 
 diff --git a/bindings/cpp/src/Session.hpp b/bindings/cpp/src/Session.hpp
 index 1aacc517..53d158c1 100644
@@ -647,6 +650,20 @@ index 62b16c8f..748fd1b7 100644
   *
   * @param[in] mod Mod info mod.
   * @param[out] diff Loaded diff to return.
+diff --git a/src/executables/sysrepocfg.c b/src/executables/sysrepocfg.c
+index 15d4f31a..9a0b7018 100644
+--- a/src/executables/sysrepocfg.c
++++ b/src/executables/sysrepocfg.c
+@@ -164,6 +164,9 @@ step_edit_input(const char *editor, const char *path)
+             error_print(0, "Editor exited in a non-standard way");
+             return EXIT_FAILURE;
+         }
++
++        // Return exit status of the child
++        return WEXITSTATUS(ret);
+     }
+
+     return EXIT_SUCCESS;
 diff --git a/src/modinfo.c b/src/modinfo.c
 index f03cda47..881f2839 100644
 --- a/src/modinfo.c
