@@ -1,13 +1,12 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
+From bc0d97d2886d4d58a9611388e64f1094c060d349 Mon Sep 17 00:00:00 2001
+From: Romain Chaumontet <quic_rchaumon@quicinc.com>
+Date: Mon, 7 Apr 2025 07:50:21 +0200
+Subject: [PATCH] Mplane Changes
 
-From 8da54e9d89643f54cdd7f68315216db625945147 Mon Sep 17 00:00:00 2001
-From: Rishi Singh <quic_rishikan@quicinc.com>
-Date: Wed, 12 Mar 2025 09:06:26 +0100
-Subject: [PATCH] read authorized_keys from /etc/mplane/.ssh
-
-make sysrepo operations timeout to be configurable
+read authorized_keys from /etc/mplane/.ssh
 
 Make hostkey insertion compatible with earlier yang modules
 
@@ -51,19 +50,19 @@ Signed-off-by: Rishi Singh <quic_rishikan@quicinc.com>
  src/common.c                   |   9 ++
  src/log.c                      | 110 +++++++++++++++++--
  src/log.h                      |   6 ++
- src/main.c                     | 142 ++++++++++++++++++++++--
+ src/main.c                     |  95 ++++++++++++++--
  src/netconf.c                  |  96 +++++++++++++----
  src/netconf_server.c           | 191 +++++++++++++++++++++++++++++++++
  src/netconf_server.h           |  11 ++
  src/netconf_server_ssh.c       |   4 +-
- 12 files changed, 580 insertions(+), 50 deletions(-)
+ 12 files changed, 533 insertions(+), 50 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..44355b0 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -275,3 +275,39 @@ add_custom_target(cleancache
- 
+
  # uninstall
  add_custom_target(uninstall "${CMAKE_COMMAND}" -P "${CMAKE_MODULE_PATH}/uninstall.cmake")
 +
@@ -109,7 +108,7 @@ index 8dda6df..65f77e1 100644
 @@ -49,11 +49,19 @@ else()
          ${CMAKE_LIBRARY_PATH} ${CMAKE_INSTALL_PREFIX}/lib
      )
- 
+
 +    find_library(SYSREPO_CPP_LIBRARY
 +        NAMES sysrepo-cpp libsysrepo-cpp
 +        PATHS /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64 /opt/local/lib /sw/lib
@@ -122,7 +121,7 @@ index 8dda6df..65f77e1 100644
 -    mark_as_advanced(SYSREPO_INCLUDE_DIRS SYSREPO_LIBRARIES)
 +    set(SYSREPO_CPP_LIBRARIES ${SYSREPO_CPP_LIBRARY})
 +    mark_as_advanced(SYSREPO_INCLUDE_DIRS SYSREPO_LIBRARIES SYSREPO_CPP_LIBRARIES)
- 
+
      # handle the QUIETLY and REQUIRED arguments and set SYSREPO_FOUND to TRUE
      # if all listed variables are TRUE
 -    find_package_handle_standard_args(Sysrepo DEFAULT_MSG SYSREPO_LIBRARY SYSREPO_INCLUDE_DIR)
@@ -146,7 +145,7 @@ index 317e5ef..b5d7711 100755
 --- a/scripts/setup.sh
 +++ b/scripts/setup.sh
 @@ -23,20 +23,9 @@ GROUP=${NP2_MODULE_GROUP}
- 
+
  # array of modules to install
  MODULES=(
 -"ietf-netconf-acm@2018-02-14.yang"
@@ -164,7 +163,7 @@ index 317e5ef..b5d7711 100755
 -"ietf-tls-server@2019-07-02.yang -e local-client-auth-supported"
 -"ietf-netconf-server@2019-07-02.yang -e ssh-listen -e tls-listen -e ssh-call-home -e tls-call-home"
  )
- 
+
  # functions
 diff --git a/src/common.c b/src/common.c
 index 02ef4ba..27e08e2 100644
@@ -173,17 +172,17 @@ index 02ef4ba..27e08e2 100644
 @@ -38,6 +38,9 @@
  #include "netconf_acm.h"
  #include "netconf_monitoring.h"
- 
+
 +#ifdef SUCCESVOTER_ENABLED
 +#include "libsetsuccessvoter.h"
 +#endif
  struct np2srv np2srv = {.unix_mode = -1, .unix_uid = -1, .unix_gid = -1};
- 
+
  int
 @@ -179,6 +182,12 @@ np2srv_new_session_cb(const char *UNUSED(client_name), struct nc_session *new_se
          free(event_data);
      }
- 
+
 +#ifdef SUCCESVOTER_ENABLED
 +    VRB("Sending success vote to ab-updater");
 +    const char *modulename = "netopeer2";
@@ -191,7 +190,7 @@ index 02ef4ba..27e08e2 100644
 +#endif
 +
      return;
- 
+
  error:
 diff --git a/src/log.c b/src/log.c
 index 4260108..6b49b47 100644
@@ -215,7 +214,7 @@ index 4260108..6b49b47 100644
 +#include <pthread.h>
  #include "common.h"
  #include "log.h"
- 
+
 +#ifdef DIAG_LOGGING
 +#include <diag/msg.h>   // for MSG_SPRINTF_1
 +#define MSG_SSID_CSM_ORAN_MPLANE_RU_NP   11064
@@ -226,7 +225,7 @@ index 4260108..6b49b47 100644
  uint8_t np2_sr_verbose_level;
 @@ -44,7 +52,23 @@ np2log(int priority, const char *src, const char *fmt, ...)
      va_end(ap);
- 
+
      if (np2_stderr_log) {
 -        format = malloc(11 + strlen(fmt) + 2);
 +        pthread_t thread_id = pthread_self();
@@ -250,7 +249,7 @@ index 4260108..6b49b47 100644
              fprintf(stderr, "[ERR]: Memory allocation failed (%s:%d), src: %s, fmt: %s\n", __FILE__, __LINE__, src, fmt);
              return;
 @@ -52,21 +76,38 @@ np2log(int priority, const char *src, const char *fmt, ...)
- 
+
          switch (priority) {
          case LOG_ERR:
 -            sprintf(format, "[ERR]: %s: %s\n", src, fmt);
@@ -290,13 +289,13 @@ index 4260108..6b49b47 100644
              break;
          }
 +#endif
- 
+
          va_start(ap, fmt);
          vfprintf(stderr, format, ap);
 @@ -236,6 +277,61 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
      free(buf);
  }
- 
+
 +/**
 + * @brief LibSSH logging callback function.
 + *
@@ -362,7 +361,7 @@ index 66262e4..b98e337 100644
 @@ -71,4 +71,10 @@ void np2log_cb_ly(LY_LOG_LEVEL level, const char *msg, const char *path);
   */
  void np2log_cb_sr(sr_log_level_t level, const char *msg);
- 
+
 +/**
 + * @brief printer callback for libshh
 + */
@@ -371,10 +370,16 @@ index 66262e4..b98e337 100644
 +
  #endif /* NP2SRV_LOG_H_ */
 diff --git a/src/main.c b/src/main.c
-index d1abcdb..e60737e 100644
+index d1abcdb..d54eb92 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -39,6 +39,7 @@
+@@ -34,11 +34,13 @@
+ #include "common.h"
+ #include "log.h"
+ #include "netconf.h"
++
+ #if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
+ # include "netconf_server.h"
  #endif
  #ifdef NC_ENABLED_SSH
  # include "netconf_server_ssh.h"
@@ -382,10 +387,10 @@ index d1abcdb..e60737e 100644
  #endif
  #ifdef NC_ENABLED_TLS
  # include "netconf_server_tls.h"
-@@ -47,6 +48,11 @@
+@@ -47,6 +49,11 @@
  #include "netconf_monitoring.h"
  #include "netconf_nmda.h"
- 
+
 +#ifdef DIAG_LOGGING
 +#include <diag/msg.h>	    // For diag data-types
 +#include <diag/diag_lsm.h>  // For Diag_LSM_Init()
@@ -393,17 +398,17 @@ index d1abcdb..e60737e 100644
 +
  /** @brief flag for main loop */
  ATOMIC_T loop_continue = 1;
- 
-@@ -744,6 +750,8 @@ server_rpc_subscribe(void)
+
+@@ -744,6 +751,8 @@ server_rpc_subscribe(void)
      const char *xpath;
      int rc;
- 
+
 +    /* Set the Max Call home callback */
 +    nc_server_update_max_call_home_clb(call_home_attempts_exceeded_clb);
  #define SR_RPC_SUBSCR(xpath, cb) \
      rc = sr_rpc_subscribe_tree(np2srv.sr_sess, xpath, cb, NULL, 0, SR_SUBSCR_CTX_REUSE, &np2srv.sr_rpc_sub); \
      if (rc != SR_ERR_OK) { \
-@@ -756,13 +764,13 @@ server_rpc_subscribe(void)
+@@ -756,13 +765,13 @@ server_rpc_subscribe(void)
          EINT;
          goto error;
      }
@@ -420,7 +425,7 @@ index d1abcdb..e60737e 100644
      /* keep close-session empty so that internal lnc2 callback is used */
      SR_RPC_SUBSCR("/ietf-netconf:kill-session", np2srv_rpc_kill_cb);
      SR_RPC_SUBSCR("/ietf-netconf:commit", np2srv_rpc_commit_cb);
-@@ -934,8 +942,30 @@ server_data_subscribe(void)
+@@ -934,8 +943,30 @@ server_data_subscribe(void)
      mod_name = "ietf-truststore";
      xpath = "/ietf-truststore:truststore/certificates";
      SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_dummy_cb);
@@ -436,7 +441,7 @@ index d1abcdb..e60737e 100644
 +    xpath = "/o-ran-operations:operational-info/max-call-home-attempts";
 +    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_max_call_home_attempts);
  #endif
- 
+
 +    /*
 +     * ietf-interfaces: to get m-plane-marking
 +     */
@@ -451,20 +456,20 @@ index d1abcdb..e60737e 100644
      /*
       * ietf-netconf-acm
       */
-@@ -978,6 +1008,9 @@ worker_thread(void *arg)
- 
+@@ -978,6 +1009,9 @@ worker_thread(void *arg)
+
  #ifdef NC_ENABLED_SSH
      nc_libssh_thread_verbosity(np2_libssh_verbose_level);
 +    if(ssh_set_log_callback(np2log_cb_sh)) {
 +        ERR("Failed to set LibSSH log callback function.");
 +    }
  #endif
- 
+
      while (ATOMIC_LOAD_RELAXED(loop_continue)) {
-@@ -1098,6 +1131,39 @@ main(int argc, char *argv[])
+@@ -1098,6 +1132,39 @@ main(int argc, char *argv[])
      openlog("netopeer2-server", LOG_PID, LOG_DAEMON);
      np2_stderr_log = 1;
- 
+
 +#ifdef SUCCESVOTER_ENABLED
 +    #define MAX_LINE_LENGTH_MACHINE 100
 +    char machine_name_line[MAX_LINE_LENGTH_MACHINE];
@@ -501,7 +506,7 @@ index d1abcdb..e60737e 100644
      /* process command line options */
      while ((c = getopt(argc, argv, "dhVp:U::m:u:g:t:v:c:")) != -1) {
          switch (c) {
-@@ -1120,21 +1186,26 @@ main(int argc, char *argv[])
+@@ -1120,21 +1187,26 @@ main(int argc, char *argv[])
              switch (np2_verbose_level) {
              case NC_VERB_ERROR:
                  np2_sr_verbose_level = SR_LL_ERR;
@@ -519,7 +524,7 @@ index d1abcdb..e60737e 100644
 +                np2_libssh_verbose_level = SSH_LOG_PROTOCOL;
                  break;
              }
- 
+
              nc_verbosity(np2_verbose_level);
  #ifdef NC_ENABLED_SSH
              nc_libssh_thread_verbosity(np2_libssh_verbose_level);
@@ -531,65 +536,10 @@ index d1abcdb..e60737e 100644
  #endif
              break;
          case 'V':
-@@ -1248,6 +1319,54 @@ main(int argc, char *argv[])
-         }
-     }
- 
-+    {
-+        #define MAX_LINE_LENGTH 100
-+        char line[MAX_LINE_LENGTH];
-+        // Open the file for reading
-+        FILE *file = fopen("/etc/mplane/ru/config/np_config.txt", "r");
-+        if (file == NULL)
-+        {
-+            WRN("Error opening the file.\n");
-+        }
-+        uint32_t timeoutValue = 120;
-+        // Read lines from the file
-+        while (fgets(line, MAX_LINE_LENGTH, file) != NULL)
-+        {
-+            // Find the position of the '=' character
-+            char *separator = strchr(line, '=');
-+            if (separator != NULL)
-+            {
-+                // Split the line into key and value using the '=' character
-+                char key[MAX_LINE_LENGTH/2];
-+                char value[MAX_LINE_LENGTH/2];
-+                *separator = '\0';
-+                strcpy(key, line);
-+                strcpy(value, separator + 1);
-+
-+                // Check if the key is "timeout"
-+                if (strcmp(key, "sr_timeout") == 0)
-+                {
-+                    // Convert the value to an integer
-+                    timeoutValue = atoi(value);
-+                    DBG("sr timeout is %ds\n", timeoutValue);
-+                }
-+                else
-+                {
-+                    WRN("%s\n",value);
-+                }
-+            }
-+        }
-+
-+        // Close the file
-+        fclose(file);
-+
-+        if (timeoutValue)
-+        {
-+            np2srv.sr_timeout = timeoutValue;
-+            np2srv.sr_timeout *= 1000;
-+        }
-+    }
-+    WRN("sr timeout is %ds\n", np2srv.sr_timeout);
-     /* daemonize */
-     if (daemonize == 1) {
-         if (daemon(0, 0) != 0) {
-@@ -1307,6 +1426,12 @@ main(int argc, char *argv[])
+@@ -1307,6 +1379,12 @@ main(int argc, char *argv[])
      ly_set_log_clb(np2log_cb_ly, 1); /* libyang */
      sr_log_set_cb(np2log_cb_sr); /* sysrepo, log level is checked by callback */
- 
+
 +
 +#ifdef DIAG_LOGGING
 +    /* Initialize diag logging */
@@ -599,10 +549,10 @@ index d1abcdb..e60737e 100644
      /* initiate NETCONF server */
      if (server_init()) {
          ret = EXIT_FAILURE;
-@@ -1379,5 +1504,10 @@ cleanup:
+@@ -1379,5 +1457,10 @@ cleanup:
      /* removes the context and clears all the sessions */
      sr_disconnect(np2srv.sr_conn);
- 
+
 +#ifdef DIAG_LOGGING
 +    /* Deinit diag-logging */
 +    Diag_LSM_DeInit();
@@ -615,7 +565,7 @@ index 0bbe112..dcc82ab 100644
 --- a/src/netconf.c
 +++ b/src/netconf.c
 @@ -26,7 +26,6 @@
- 
+
  #include <sysrepo.h>
  #include <libyang/libyang.h>
 -
@@ -625,7 +575,7 @@ index 0bbe112..dcc82ab 100644
 @@ -837,11 +836,46 @@ cleanup:
      return rc;
  }
- 
+
 +static int
 +np2srv_rpc_subscribe_append_str(const char *str, char **ret)
 +{
@@ -676,7 +626,7 @@ index 0bbe112..dcc82ab 100644
      uint32_t idx;
 +    char* colon_pos = NULL;
 +    char* prefix = NULL;
- 
+
      /* find this NETCONF session */
      for (i = 0; (ncs = nc_ps_get_session(np2srv.nc_ps, i)); ++i) {
 @@ -867,8 +903,9 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
@@ -684,7 +634,7 @@ index 0bbe112..dcc82ab 100644
      stream = ((struct lyd_node_leaf_list *)nodeset->set.d[0])->value_str;
      ly_set_free(nodeset);
 +    VRB("Stream %s", stream);
- 
+
 -    /* filter */
 +    /* filter, join all into one xpath */
      nodeset = lyd_find_path(input, "filter");
@@ -693,7 +643,7 @@ index 0bbe112..dcc82ab 100644
 @@ -876,28 +913,38 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
              goto cleanup;
          }
- 
+
 -        /* join all filters into one xpath */
 +        /* all selection filters first */
          for (i = 0; i < filter_count; ++i) {
@@ -739,10 +689,10 @@ index 0bbe112..dcc82ab 100644
 +
 +    VRB("Filters %s", xp);
      ly_set_free(nodeset);
- 
+
      /* start time */
 @@ -919,21 +966,21 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
- 
+
      /* sysrepo API */
      if (!strcmp(stream, "NETCONF")) {
 -        /* subscribe to all modules with notifications */
@@ -784,7 +734,7 @@ index 0bbe112..dcc82ab 100644
              }
 @@ -956,13 +1010,13 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
      }
- 
+
      /* success */
 -
  cleanup:
@@ -804,7 +754,7 @@ index 4645f84..902b15c 100644
 @@ -339,6 +339,173 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
      return SR_ERR_OK;
  }
- 
+
 +/* /if:interfaces/if:interface/ip:ipv4/o-ran-int:m-plane-marking */
 +/* /if:interfaces/if:interface/ip:ipv6/o-ran-int:m-plane-marking */
 +int
@@ -1013,7 +963,7 @@ index cd56bd4..f6218b9 100644
 @@ -28,6 +28,14 @@ int np2srv_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_nam
  int np2srv_ch_client_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
          uint32_t request_id, void *private_data);
- 
+
 +int np2srv_re_call_home_no_ssh_timer(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
 +        uint32_t request_id, void *private_data);
 +
@@ -1024,11 +974,11 @@ index cd56bd4..f6218b9 100644
 +
  int np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath,
          uint32_t request_id, sr_event_t event, void *private_data);
- 
+
 @@ -37,4 +45,7 @@ int np2srv_ch_connection_type_cb(sr_session_ctx_t *session, const char *module_n
  int np2srv_ch_reconnect_strategy_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath,
          uint32_t request_id, sr_event_t event, void *private_data);
- 
+
 +int np2srv_m_plane_marking(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
 +        uint32_t request_id, void *private_data);
 +
@@ -1039,7 +989,7 @@ index 1cfd3fa..f040d99 100644
 +++ b/src/netconf_server_ssh.c
 @@ -98,7 +98,7 @@ np2srv_pubkey_auth_cb(const struct nc_session *session, ssh_key key, void *UNUSE
      }
- 
+
      /* check any authorized keys */
 -    r = asprintf(&line, NP2SRV_SSH_AUTHORIZED_KEYS_PATTERN, NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
 +    r = asprintf(&line, "/etc/mplane/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
@@ -1048,13 +998,13 @@ index 1cfd3fa..f040d99 100644
          line = NULL;
 @@ -426,7 +426,7 @@ np2srv_endpt_ssh_auth_users_oper_cb(sr_session_ctx_t *UNUSED(session), const cha
          lyd_new_leaf(user, NULL, "name", pwd->pw_name);
- 
+
          /* check any authorized keys */
 -        if (asprintf(&path, NP2SRV_SSH_AUTHORIZED_KEYS_PATTERN, NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir) == -1) {
 +        if (asprintf(&path, "/data/mplane/radio/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir) == -1) {
              EMEM;
              goto cleanup;
          }
--- 
+--
 2.17.1
 

@@ -1,9 +1,9 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 Copyright (c) 2025 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
-From 1e08e4d3801cb140ef35dc401c821c0b74c6c6c4 Mon Sep 17 00:00:00 2001
+From e3e5c8d4a14edcbec7cccb9fd103d75a7250def3 Mon Sep 17 00:00:00 2001
 From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Thu, 27 Mar 2025 09:01:34 +0100
+Date: Mon, 7 Apr 2025 08:02:15 +0200
 Subject: [PATCH] Mplane changes
 
 Sysrepocfg systemcall will return the return value of the systemcall
@@ -23,7 +23,7 @@ Signed-off-by: Vishal Tripathi <quic_vishalt@quicinc.com>
 ---
  bindings/cpp/src/Session.hpp |   2 +-
  src/common.c                 | 356 ++++++++++++++++++++----
- src/common.h.in              |  65 ++++-
+ src/common.h.in              |  69 ++++-
  src/executables/sysrepocfg.c |   3 +
  src/modinfo.c                |   4 +-
  src/shm.h                    |  44 +--
@@ -31,7 +31,7 @@ Signed-off-by: Vishal Tripathi <quic_vishalt@quicinc.com>
  src/shm_main.c               |   8 +-
  src/shm_sub.c                |  12 +-
  src/sysrepo.c                |  15 +-
- 10 files changed, 515 insertions(+), 517 deletions(-)
+ 10 files changed, 517 insertions(+), 519 deletions(-)
 
 diff --git a/bindings/cpp/src/Session.hpp b/bindings/cpp/src/Session.hpp
 index 1aacc517..53d158c1 100644
@@ -524,7 +524,7 @@ index 1242a06c..a712641c 100644
      /* copy src */
      t->value_type = s->value_type;
 diff --git a/src/common.h.in b/src/common.h.in
-index 62b16c8f..748fd1b7 100644
+index 62b16c8f..789c225e 100644
 --- a/src/common.h.in
 +++ b/src/common.h.in
 @@ -46,7 +46,7 @@
@@ -554,15 +554,23 @@ index 62b16c8f..748fd1b7 100644
  /** timeout for locking subscription structure lock, should be enough for a single ::sr_process_events() call (ms) */
  #define SR_SUBSCR_LOCK_TIMEOUT 30000
 
-@@ -200,7 +197,7 @@ int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *absti
- #define SR_CHANGE_CB_TIMEOUT 5000
+@@ -197,13 +194,13 @@ int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *absti
+ #define SR_MOD_CACHE_LOCK_TIMEOUT 10000
+
+ /** default timeout for change subscription callback (ms) */
+-#define SR_CHANGE_CB_TIMEOUT 5000
++#define SR_CHANGE_CB_TIMEOUT 120000
 
  /** default timeout for operational subscription callback (ms) */
 -#define SR_OPER_CB_TIMEOUT 5000
 +#define SR_OPER_CB_TIMEOUT 120000
 
  /** default timeout for RPC/action subscription callback (ms) */
- #define SR_RPC_CB_TIMEOUT 2000
+-#define SR_RPC_CB_TIMEOUT 2000
++#define SR_RPC_CB_TIMEOUT 120000
+
+ /** umask modifying all the permissions below */
+ #define SR_UMASK @SYSREPO_UMASK@
 @@ -951,6 +948,43 @@ sr_error_info_t *sr_shm_remap(sr_shm_t *shm, size_t new_shm_size);
   */
  void sr_shm_clear(sr_shm_t *shm);
