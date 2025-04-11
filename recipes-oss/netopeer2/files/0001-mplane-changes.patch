@@ -1,14 +1,12 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
-From 919f3cd214909eb176e10f67880eeb95198e79cc Mon Sep 17 00:00:00 2001
+From bc0d97d2886d4d58a9611388e64f1094c060d349 Mon Sep 17 00:00:00 2001
 From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Mon, 19 Aug 2024 15:46:51 +0200
-Subject: [PATCH] Mplane changes
+Date: Mon, 7 Apr 2025 07:50:21 +0200
+Subject: [PATCH] Mplane Changes
 
 read authorized_keys from /etc/mplane/.ssh
-
-make sysrepo operations timeout to be configurable
 
 Make hostkey insertion compatible with earlier yang modules
 
@@ -39,21 +37,25 @@ refactor create subscription with upstream BUGFIX
 
 Add timestamp to np2 logs
 
+Fix Max callhome reset callback
+
 Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
+
+Signed-off-by: Rishi Singh <quic_rishikan@quicinc.com>
 ---
- CMakeLists.txt                 |  36 ++++++
- CMakeModules/FindSysrepo.cmake |  12 +-
+ CMakeLists.txt                 |  36 +++++++
+ CMakeModules/FindSysrepo.cmake |  12 ++-
  scripts/merge_hostkey.sh       |   2 +-
  scripts/setup.sh               |  11 --
  src/common.c                   |   9 ++
  src/log.c                      | 110 +++++++++++++++++--
- src/log.h                      |   6 +
- src/main.c                     | 140 +++++++++++++++++++++++-
- src/netconf.c                  |  96 ++++++++++++----
- src/netconf_server.c           | 193 +++++++++++++++++++++++++++++++++
- src/netconf_server.h           |   9 ++
+ src/log.h                      |   6 ++
+ src/main.c                     |  95 ++++++++++++++--
+ src/netconf.c                  |  96 +++++++++++++----
+ src/netconf_server.c           | 191 +++++++++++++++++++++++++++++++++
+ src/netconf_server.h           |  11 ++
  src/netconf_server_ssh.c       |   4 +-
- 12 files changed, 578 insertions(+), 50 deletions(-)
+ 12 files changed, 533 insertions(+), 50 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..44355b0 100644
@@ -368,10 +370,16 @@ index 66262e4..b98e337 100644
 +
  #endif /* NP2SRV_LOG_H_ */
 diff --git a/src/main.c b/src/main.c
-index d1abcdb..7cc30d0 100644
+index d1abcdb..d54eb92 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -39,6 +39,7 @@
+@@ -34,11 +34,13 @@
+ #include "common.h"
+ #include "log.h"
+ #include "netconf.h"
++
+ #if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
+ # include "netconf_server.h"
  #endif
  #ifdef NC_ENABLED_SSH
  # include "netconf_server_ssh.h"
@@ -379,7 +387,7 @@ index d1abcdb..7cc30d0 100644
  #endif
  #ifdef NC_ENABLED_TLS
  # include "netconf_server_tls.h"
-@@ -47,6 +48,11 @@
+@@ -47,6 +49,11 @@
  #include "netconf_monitoring.h"
  #include "netconf_nmda.h"
 
@@ -391,7 +399,16 @@ index d1abcdb..7cc30d0 100644
  /** @brief flag for main loop */
  ATOMIC_T loop_continue = 1;
 
-@@ -756,13 +762,13 @@ server_rpc_subscribe(void)
+@@ -744,6 +751,8 @@ server_rpc_subscribe(void)
+     const char *xpath;
+     int rc;
+
++    /* Set the Max Call home callback */
++    nc_server_update_max_call_home_clb(call_home_attempts_exceeded_clb);
+ #define SR_RPC_SUBSCR(xpath, cb) \
+     rc = sr_rpc_subscribe_tree(np2srv.sr_sess, xpath, cb, NULL, 0, SR_SUBSCR_CTX_REUSE, &np2srv.sr_rpc_sub); \
+     if (rc != SR_ERR_OK) { \
+@@ -756,13 +765,13 @@ server_rpc_subscribe(void)
          EINT;
          goto error;
      }
@@ -408,7 +425,7 @@ index d1abcdb..7cc30d0 100644
      /* keep close-session empty so that internal lnc2 callback is used */
      SR_RPC_SUBSCR("/ietf-netconf:kill-session", np2srv_rpc_kill_cb);
      SR_RPC_SUBSCR("/ietf-netconf:commit", np2srv_rpc_commit_cb);
-@@ -934,8 +940,30 @@ server_data_subscribe(void)
+@@ -934,8 +943,30 @@ server_data_subscribe(void)
      mod_name = "ietf-truststore";
      xpath = "/ietf-truststore:truststore/certificates";
      SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_dummy_cb);
@@ -439,7 +456,7 @@ index d1abcdb..7cc30d0 100644
      /*
       * ietf-netconf-acm
       */
-@@ -978,6 +1006,9 @@ worker_thread(void *arg)
+@@ -978,6 +1009,9 @@ worker_thread(void *arg)
 
  #ifdef NC_ENABLED_SSH
      nc_libssh_thread_verbosity(np2_libssh_verbose_level);
@@ -449,7 +466,7 @@ index d1abcdb..7cc30d0 100644
  #endif
 
      while (ATOMIC_LOAD_RELAXED(loop_continue)) {
-@@ -1098,6 +1129,39 @@ main(int argc, char *argv[])
+@@ -1098,6 +1132,39 @@ main(int argc, char *argv[])
      openlog("netopeer2-server", LOG_PID, LOG_DAEMON);
      np2_stderr_log = 1;
 
@@ -489,7 +506,7 @@ index d1abcdb..7cc30d0 100644
      /* process command line options */
      while ((c = getopt(argc, argv, "dhVp:U::m:u:g:t:v:c:")) != -1) {
          switch (c) {
-@@ -1120,21 +1184,26 @@ main(int argc, char *argv[])
+@@ -1120,21 +1187,26 @@ main(int argc, char *argv[])
              switch (np2_verbose_level) {
              case NC_VERB_ERROR:
                  np2_sr_verbose_level = SR_LL_ERR;
@@ -519,62 +536,7 @@ index d1abcdb..7cc30d0 100644
  #endif
              break;
          case 'V':
-@@ -1248,6 +1317,54 @@ main(int argc, char *argv[])
-         }
-     }
-
-+    {
-+        #define MAX_LINE_LENGTH 100
-+        char line[MAX_LINE_LENGTH];
-+        // Open the file for reading
-+        FILE *file = fopen("/etc/mplane/ru/config/np_config.txt", "r");
-+        if (file == NULL)
-+        {
-+            WRN("Error opening the file.\n");
-+        }
-+        uint32_t timeoutValue = 120;
-+        // Read lines from the file
-+        while (fgets(line, MAX_LINE_LENGTH, file) != NULL)
-+        {
-+            // Find the position of the '=' character
-+            char *separator = strchr(line, '=');
-+            if (separator != NULL)
-+            {
-+                // Split the line into key and value using the '=' character
-+                char key[MAX_LINE_LENGTH/2];
-+                char value[MAX_LINE_LENGTH/2];
-+                *separator = '\0';
-+                strcpy(key, line);
-+                strcpy(value, separator + 1);
-+
-+                // Check if the key is "timeout"
-+                if (strcmp(key, "sr_timeout") == 0)
-+                {
-+                    // Convert the value to an integer
-+                    timeoutValue = atoi(value);
-+                    DBG("sr timeout is %ds\n", timeoutValue);
-+                }
-+                else
-+                {
-+                    WRN("%s\n",value);
-+                }
-+            }
-+        }
-+
-+        // Close the file
-+        fclose(file);
-+
-+        if (timeoutValue)
-+        {
-+            np2srv.sr_timeout = timeoutValue;
-+            np2srv.sr_timeout *= 1000;
-+        }
-+    }
-+    WRN("sr timeout is %ds\n", np2srv.sr_timeout);
-     /* daemonize */
-     if (daemonize == 1) {
-         if (daemon(0, 0) != 0) {
-@@ -1307,6 +1424,12 @@ main(int argc, char *argv[])
+@@ -1307,6 +1379,12 @@ main(int argc, char *argv[])
      ly_set_log_clb(np2log_cb_ly, 1); /* libyang */
      sr_log_set_cb(np2log_cb_sr); /* sysrepo, log level is checked by callback */
 
@@ -587,7 +549,7 @@ index d1abcdb..7cc30d0 100644
      /* initiate NETCONF server */
      if (server_init()) {
          ret = EXIT_FAILURE;
-@@ -1379,5 +1502,10 @@ cleanup:
+@@ -1379,5 +1457,10 @@ cleanup:
      /* removes the context and clears all the sessions */
      sr_disconnect(np2srv.sr_conn);
 
@@ -786,10 +748,10 @@ index 0bbe112..dcc82ab 100644
          nc_session_set_notif_status(ncs, 0);
      }
 diff --git a/src/netconf_server.c b/src/netconf_server.c
-index 4645f84..9a285cf 100644
+index 4645f84..902b15c 100644
 --- a/src/netconf_server.c
 +++ b/src/netconf_server.c
-@@ -339,6 +339,175 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
+@@ -339,6 +339,173 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
      return SR_ERR_OK;
  }
 
@@ -955,17 +917,15 @@ index 4645f84..9a285cf 100644
 +    {
 +        return rc;
 +    }
-+    nc_server_update_max_call_home_attempts(value->data.uint8_val,
-+                                            call_home_attempts_exceeded_clb);
++    nc_server_update_max_call_home_attempts(value->data.uint8_val);
 +
 +    return SR_ERR_OK;
 +}
 +
-+
  /* /ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ * /tcp-client-parameters */
  int
  np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
-@@ -382,6 +551,30 @@ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUS
+@@ -382,6 +549,30 @@ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUS
                      return SR_ERR_INTERNAL;
                  }
              }
@@ -997,15 +957,17 @@ index 4645f84..9a285cf 100644
              if (op == SR_OP_CREATED) {
                  rc = nc_server_ch_client_endpt_enable_keepalives(client_name, endpt_name, 1);
 diff --git a/src/netconf_server.h b/src/netconf_server.h
-index cd56bd4..a12aa2c 100644
+index cd56bd4..f6218b9 100644
 --- a/src/netconf_server.h
 +++ b/src/netconf_server.h
-@@ -28,6 +28,12 @@ int np2srv_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_nam
+@@ -28,6 +28,14 @@ int np2srv_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_nam
  int np2srv_ch_client_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
          uint32_t request_id, void *private_data);
 
 +int np2srv_re_call_home_no_ssh_timer(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
 +        uint32_t request_id, void *private_data);
++
++void call_home_attempts_exceeded_clb();
 +
 +int np2srv_max_call_home_attempts(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
 +        uint32_t request_id, void *private_data);
@@ -1013,7 +975,7 @@ index cd56bd4..a12aa2c 100644
  int np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath,
          uint32_t request_id, sr_event_t event, void *private_data);
 
-@@ -37,4 +43,7 @@ int np2srv_ch_connection_type_cb(sr_session_ctx_t *session, const char *module_n
+@@ -37,4 +45,7 @@ int np2srv_ch_connection_type_cb(sr_session_ctx_t *session, const char *module_n
  int np2srv_ch_reconnect_strategy_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath,
          uint32_t request_id, sr_event_t event, void *private_data);
 
