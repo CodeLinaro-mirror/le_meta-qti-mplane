@@ -1,10 +1,12 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 Copyright (c) 2025 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
-From e3e5c8d4a14edcbec7cccb9fd103d75a7250def3 Mon Sep 17 00:00:00 2001
+From 3b7564ee5ef3f095ef73273e7568b62aafd55b50 Mon Sep 17 00:00:00 2001
 From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Mon, 7 Apr 2025 08:02:15 +0200
+Date: Mon, 26 May 2025 08:01:38 +0200
 Subject: [PATCH] Mplane changes
+
+Remove prints of the shared memory to avoid flood
 
 Sysrepocfg systemcall will return the return value of the systemcall
 
@@ -22,16 +24,16 @@ Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
 Signed-off-by: Vishal Tripathi <quic_vishalt@quicinc.com>
 ---
  bindings/cpp/src/Session.hpp |   2 +-
- src/common.c                 | 356 ++++++++++++++++++++----
- src/common.h.in              |  69 ++++-
+ src/common.c                 | 356 +++++++++++++++++++++-----
+ src/common.h.in              |  69 +++--
  src/executables/sysrepocfg.c |   3 +
  src/modinfo.c                |   4 +-
- src/shm.h                    |  44 +--
- src/shm_ext.c                | 523 ++++++++---------------------------
+ src/shm.h                    |  44 ++--
+ src/shm_ext.c                | 475 +++++------------------------------
  src/shm_main.c               |   8 +-
  src/shm_sub.c                |  12 +-
  src/sysrepo.c                |  15 +-
- 10 files changed, 517 insertions(+), 519 deletions(-)
+ 10 files changed, 469 insertions(+), 519 deletions(-)
 
 diff --git a/bindings/cpp/src/Session.hpp b/bindings/cpp/src/Session.hpp
 index 1aacc517..53d158c1 100644
@@ -786,7 +788,7 @@ index ec6c35c1..d20eca49 100644
   * @brief Add main SHM module change subscription and create sub SHM if the first subscription was added.
   * Ext SHM may be remapped!
 diff --git a/src/shm_ext.c b/src/shm_ext.c
-index 683a26e1..3a91a5c4 100644
+index 683a26e1..9d9b15af 100644
 --- a/src/shm_ext.c
 +++ b/src/shm_ext.c
 @@ -42,7 +42,7 @@ sr_shmext_conn_remap_lock(sr_conn_ctx_t *conn, sr_lock_mode_t mode, int ext_lock
@@ -1331,27 +1333,7 @@ index 683a26e1..3a91a5c4 100644
          goto cleanup_changesub_unlock;
      }
 
-@@ -674,6 +372,9 @@ sr_shmext_change_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, const
-         }
-     }
-
-+    SR_LOG_DBG("#SHM before (adding change sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
-     /* allocate new subscription and its xpath, if any */
-     if ((err_info = sr_shmrealloc_add(&conn->ext_shm, &shm_mod->change_sub[ds].subs, &shm_mod->change_sub[ds].sub_count,
-             0, sizeof *shm_sub, -1, (void **)&shm_sub, xpath ? sr_strshmlen(xpath) : 0, &xpath_off))) {
-@@ -692,6 +393,9 @@ sr_shmext_change_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, const
-     shm_sub->evpipe_num = evpipe_num;
-     shm_sub->cid = conn->cid;
-
-+    SR_LOG_DBG("#SHM after (adding change sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
-     if (shm_mod->change_sub[ds].sub_count == 1) {
-         /* create the sub SHM while still holding the locks */
-         if ((err_info = sr_shmsub_create(conn->main_shm.addr + shm_mod->name, sr_ds2str(ds), -1,
-@@ -701,14 +405,11 @@ sr_shmext_change_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, const
+@@ -701,14 +399,11 @@ sr_shmext_change_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, const
      }
 
      /* EXT WRITE UNLOCK */
@@ -1367,7 +1349,7 @@ index 683a26e1..3a91a5c4 100644
      if (ds == SR_DS_RUNNING) {
          /* technically, operational data may have changed */
          if ((err_info = sr_module_update_oper_diff(conn, conn->main_shm.addr + shm_mod->name))) {
-@@ -720,7 +421,7 @@ sr_shmext_change_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, const
+@@ -720,7 +415,7 @@ sr_shmext_change_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, const
 
  cleanup_changesub_ext_unlock:
      /* EXT WRITE UNLOCK */
@@ -1376,26 +1358,19 @@ index 683a26e1..3a91a5c4 100644
 
  cleanup_changesub_unlock:
      /* CHANGE SUB WRITE UNLOCK */
-@@ -746,9 +447,16 @@ sr_shmext_change_subscription_free(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_da
-
+@@ -747,8 +442,9 @@ sr_shmext_change_subscription_free(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_da
      shm_sub = (sr_mod_change_sub_t *)(conn->ext_shm.addr + shm_mod->change_sub[ds].subs);
 
-+    SR_LOG_DBG("#SHM before (removing change sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
      /* free the subscription and its xpath, if any */
 -    sr_shmrealloc_del(conn->ext_shm.addr, &shm_mod->change_sub[ds].subs, &shm_mod->change_sub[ds].sub_count,
 -            sizeof *shm_sub, del_idx, shm_sub[del_idx].xpath ? sr_strshmlen(conn->ext_shm.addr + shm_sub[del_idx].xpath) : 0);
 +    sr_shmrealloc_del(&conn->ext_shm, &shm_mod->change_sub[ds].subs, &shm_mod->change_sub[ds].sub_count,
 +            sizeof *shm_sub, del_idx, shm_sub[del_idx].xpath ? sr_strshmlen(conn->ext_shm.addr + shm_sub[del_idx].xpath) : 0,
 +            shm_sub[del_idx].xpath);
-+
-+    SR_LOG_DBG("#SHM after (removing change sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
 
      if (!shm_mod->change_sub[ds].sub_count) {
          /* unlink the sub SHM */
-@@ -776,7 +484,7 @@ sr_shmext_change_subscription_del(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_dat
+@@ -776,7 +472,7 @@ sr_shmext_change_subscription_del(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_dat
      }
 
      /* EXT READ LOCK */
@@ -1404,7 +1379,7 @@ index 683a26e1..3a91a5c4 100644
          goto cleanup_changesub_unlock;
      }
 
-@@ -802,15 +510,12 @@ sr_shmext_change_subscription_del(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_dat
+@@ -802,15 +498,12 @@ sr_shmext_change_subscription_del(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_dat
 
  cleanup_changesub_ext_unlock:
      /* EXT READ UNLOCK */
@@ -1421,7 +1396,7 @@ index 683a26e1..3a91a5c4 100644
      if (!err_info && (ds == SR_DS_RUNNING)) {
          /* technically, operational data changed */
          err_info = sr_module_update_oper_diff(conn, conn->main_shm.addr + shm_mod->name);
-@@ -877,9 +582,6 @@ sr_shmext_change_subscription_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_da
+@@ -877,9 +570,6 @@ sr_shmext_change_subscription_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, sr_da
 
              /* CHANGE SUB WRITE UNLOCK */
              sr_rwunlock(&shm_mod->change_sub[ds].lock, 0, SR_LOCK_WRITE, conn->cid, __func__);
@@ -1431,27 +1406,7 @@ index 683a26e1..3a91a5c4 100644
          }
      }
 
-@@ -954,6 +656,9 @@ sr_shmext_oper_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, const ch
-         }
-     }
-
-+    SR_LOG_DBG("#SHM before (adding oper sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
-     /* allocate new subscription and its xpath, if any */
-     if ((err_info = sr_shmrealloc_add(&conn->ext_shm, &shm_mod->oper_subs, &shm_mod->oper_sub_count, 0, sizeof *shm_sub,
-             i, (void **)&shm_sub, sr_strshmlen(xpath), &xpath_off))) {
-@@ -968,6 +673,9 @@ sr_shmext_oper_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, const ch
-     shm_sub->evpipe_num = evpipe_num;
-     shm_sub->cid = conn->cid;
-
-+    SR_LOG_DBG("#SHM after (adding oper sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
-     /* create the sub SHM while still holding the locks */
-     if ((err_info = sr_shmsub_create(conn->main_shm.addr + shm_mod->name, "oper", sr_str_hash(xpath),
-             sizeof(sr_sub_shm_t)))) {
-@@ -982,9 +690,6 @@ cleanup_opersub_unlock:
+@@ -982,9 +672,6 @@ cleanup_opersub_unlock:
      /* OPER SUB WRITE UNLOCK */
      sr_rwunlock(&shm_mod->oper_lock, 0, SR_LOCK_WRITE, conn->cid, __func__);
 
@@ -1461,25 +1416,18 @@ index 683a26e1..3a91a5c4 100644
      return err_info;
  }
 
-@@ -1010,9 +715,15 @@ sr_shmext_oper_subscription_free(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_
-         goto cleanup;
+@@ -1011,8 +698,8 @@ sr_shmext_oper_subscription_free(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_
      }
 
-+    SR_LOG_DBG("#SHM before (removing oper sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
      /* free the subscription */
 -    sr_shmrealloc_del(conn->ext_shm.addr, &shm_mod->oper_subs, &shm_mod->oper_sub_count, sizeof *shm_sub, del_idx,
 -            sr_strshmlen(conn->ext_shm.addr + shm_sub[del_idx].xpath));
 +    sr_shmrealloc_del(&conn->ext_shm, &shm_mod->oper_subs, &shm_mod->oper_sub_count, sizeof *shm_sub, del_idx,
 +            sr_strshmlen(conn->ext_shm.addr + shm_sub[del_idx].xpath), shm_sub[del_idx].xpath);
-+
-+    SR_LOG_DBG("#SHM after (removing oper sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
 
  cleanup:
      return err_info;
-@@ -1062,9 +773,6 @@ cleanup_opersub_unlock:
+@@ -1062,9 +749,6 @@ cleanup_opersub_unlock:
      /* OPER SUB WRITE UNLOCK */
      sr_rwunlock(&shm_mod->oper_lock, 0, SR_LOCK_WRITE, conn->cid, __func__);
 
@@ -1489,7 +1437,7 @@ index 683a26e1..3a91a5c4 100644
      return err_info;
  }
 
-@@ -1126,9 +834,6 @@ sr_shmext_oper_subscription_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_
+@@ -1126,9 +810,6 @@ sr_shmext_oper_subscription_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_
 
              /* OPER SUB WRITE UNLOCK */
              sr_rwunlock(&shm_mod->oper_lock, 0, SR_LOCK_WRITE, conn->cid, __func__);
@@ -1499,27 +1447,7 @@ index 683a26e1..3a91a5c4 100644
          }
      }
 
-@@ -1162,6 +867,9 @@ sr_shmext_notif_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_
-         goto cleanup_notifsub_unlock;
-     }
-
-+    SR_LOG_DBG("#SHM before (adding notif sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
-     /* add new item */
-     if ((err_info = sr_shmrealloc_add(&conn->ext_shm, &shm_mod->notif_subs, &shm_mod->notif_sub_count, 0,
-             sizeof *shm_sub, -1, (void **)&shm_sub, 0, NULL))) {
-@@ -1174,6 +882,9 @@ sr_shmext_notif_subscription_add(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32_
-     ATOMIC_STORE_RELAXED(shm_sub->suspended, suspended);
-     shm_sub->cid = conn->cid;
-
-+    SR_LOG_DBG("#SHM after (adding notif sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
-     if (shm_mod->notif_sub_count == 1) {
-         /* create the sub SHM while still holding the locks */
-         if ((err_info = sr_shmsub_create(conn->main_shm.addr + shm_mod->name, "notif", -1, sizeof(sr_sub_shm_t)))) {
-@@ -1189,9 +900,6 @@ cleanup_notifsub_unlock:
+@@ -1189,9 +870,6 @@ cleanup_notifsub_unlock:
      /* NOTIF SUB WRITE UNLOCK */
      sr_rwunlock(&shm_mod->notif_lock, 0, SR_LOCK_WRITE, conn->cid, __func__);
 
@@ -1529,25 +1457,18 @@ index 683a26e1..3a91a5c4 100644
      return err_info;
  }
 
-@@ -1208,9 +916,15 @@ sr_shmext_notif_subscription_free(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32
- {
+@@ -1209,8 +887,8 @@ sr_shmext_notif_subscription_free(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32
      sr_error_info_t *err_info = NULL;
 
-+    SR_LOG_DBG("#SHM before (removing notif sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
      /* free the subscription */
 -    sr_shmrealloc_del(conn->ext_shm.addr, &shm_mod->notif_subs, &shm_mod->notif_sub_count, sizeof(sr_mod_notif_sub_t),
 -            del_idx, 0);
 +    sr_shmrealloc_del(&conn->ext_shm, &shm_mod->notif_subs, &shm_mod->notif_sub_count, sizeof(sr_mod_notif_sub_t),
 +            del_idx, 0, 0);
-+
-+    SR_LOG_DBG("#SHM after (removing notif sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
 
      if (!shm_mod->notif_sub_count) {
          /* unlink the sub SHM */
-@@ -1266,9 +980,6 @@ cleanup_notifsub_unlock:
+@@ -1266,9 +944,6 @@ cleanup_notifsub_unlock:
      /* NOTIF SUB WRITE UNLOCK */
      sr_rwunlock(&shm_mod->notif_lock, 0, SR_LOCK_WRITE, conn->cid, __func__);
 
@@ -1557,7 +1478,7 @@ index 683a26e1..3a91a5c4 100644
      return err_info;
  }
 
-@@ -1328,9 +1039,6 @@ sr_shmext_notif_subscription_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32
+@@ -1328,9 +1003,6 @@ sr_shmext_notif_subscription_stop(sr_conn_ctx_t *conn, sr_mod_t *shm_mod, uint32
 
          /* NOTIF SUB WRITE UNLOCK */
          sr_rwunlock(&shm_mod->notif_lock, 0, SR_LOCK_WRITE, conn->cid, __func__);
@@ -1567,27 +1488,7 @@ index 683a26e1..3a91a5c4 100644
      }
 
      if (del_evpipe) {
-@@ -1388,6 +1096,9 @@ sr_shmext_rpc_subscription_add(sr_conn_ctx_t *conn, sr_rpc_t *shm_rpc, const cha
-         }
-     }
-
-+    SR_LOG_DBG("#SHM before (adding rpc sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
-     /* add new subscription with its xpath */
-     if ((err_info = sr_shmrealloc_add(&conn->ext_shm, &shm_rpc->subs, &shm_rpc->sub_count, 0, sizeof *shm_sub, -1,
-             (void **)&shm_sub, sr_strshmlen(xpath), &xpath_off))) {
-@@ -1402,6 +1113,9 @@ sr_shmext_rpc_subscription_add(sr_conn_ctx_t *conn, sr_rpc_t *shm_rpc, const cha
-     shm_sub->evpipe_num = evpipe_num;
-     shm_sub->cid = conn->cid;
-
-+    SR_LOG_DBG("#SHM after (adding rpc sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
-     if (shm_rpc->sub_count == 1) {
-         /* create the sub SHM while still holding the locks */
-         mod_name = sr_get_first_ns(conn->main_shm.addr + shm_rpc->path);
-@@ -1419,9 +1133,6 @@ cleanup_rpcsub_unlock:
+@@ -1419,9 +1091,6 @@ cleanup_rpcsub_unlock:
      /* RPC SUB WRITE UNLOCK */
      sr_rwunlock(&shm_rpc->lock, 0, SR_LOCK_WRITE, conn->cid, __func__);
 
@@ -1597,25 +1498,18 @@ index 683a26e1..3a91a5c4 100644
      free(mod_name);
      return err_info;
  }
-@@ -1443,9 +1154,15 @@ sr_shmext_rpc_subscription_free(sr_conn_ctx_t *conn, sr_rpc_t *shm_rpc, uint32_t
-
+@@ -1444,8 +1113,8 @@ sr_shmext_rpc_subscription_free(sr_conn_ctx_t *conn, sr_rpc_t *shm_rpc, uint32_t
      shm_sub = (sr_mod_rpc_sub_t *)(conn->ext_shm.addr + shm_rpc->subs);
 
-+    SR_LOG_DBG("#SHM before (removing rpc sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
-+
      /* free the subscription */
 -    sr_shmrealloc_del(conn->ext_shm.addr, &shm_rpc->subs, &shm_rpc->sub_count, sizeof *shm_sub, del_idx,
 -            sr_strshmlen(conn->ext_shm.addr + shm_sub[del_idx].xpath));
 +    sr_shmrealloc_del(&conn->ext_shm, &shm_rpc->subs, &shm_rpc->sub_count, sizeof *shm_sub, del_idx,
 +            sr_strshmlen(conn->ext_shm.addr + shm_sub[del_idx].xpath), shm_sub[del_idx].xpath);
-+
-+    SR_LOG_DBG("#SHM after (removing rpc sub)");
-+    sr_shmext_print(SR_CONN_MAIN_SHM(conn), &conn->ext_shm);
 
      if (!shm_rpc->sub_count) {
          /* unlink the sub SHM */
-@@ -1504,9 +1221,6 @@ cleanup_rpcsub_unlock:
+@@ -1504,9 +1173,6 @@ cleanup_rpcsub_unlock:
      /* RPC SUB WRITE UNLOCK */
      sr_rwunlock(&shm_rpc->lock, 0, SR_LOCK_WRITE, conn->cid, __func__);
 
@@ -1625,7 +1519,7 @@ index 683a26e1..3a91a5c4 100644
      return err_info;
  }
 
-@@ -1564,13 +1278,10 @@ sr_shmext_rpc_subscription_stop(sr_conn_ctx_t *conn, sr_rpc_t *shm_rpc, uint32_t
+@@ -1564,13 +1230,10 @@ sr_shmext_rpc_subscription_stop(sr_conn_ctx_t *conn, sr_rpc_t *shm_rpc, uint32_t
              }
          } else {
              /* EXT READ UNLOCK */
@@ -1778,5 +1672,4 @@ index 3d9403c8..e36a66c2 100644
 +}
 \ No newline at end of file
 --
-2.17.1
-
+2.43.0
