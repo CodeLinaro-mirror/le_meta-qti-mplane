@@ -1,10 +1,12 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
-From bc0d97d2886d4d58a9611388e64f1094c060d349 Mon Sep 17 00:00:00 2001
+From 1d30de04742a3033306d9481cd1099f27d817c88 Mon Sep 17 00:00:00 2001
 From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Mon, 7 Apr 2025 07:50:21 +0200
+Date: Mon, 26 May 2025 08:04:44 +0200
 Subject: [PATCH] Mplane Changes
+
+Improve log usage for libraries
 
 read authorized_keys from /etc/mplane/.ssh
 
@@ -48,14 +50,14 @@ Signed-off-by: Rishi Singh <quic_rishikan@quicinc.com>
  scripts/merge_hostkey.sh       |   2 +-
  scripts/setup.sh               |  11 --
  src/common.c                   |   9 ++
- src/log.c                      | 110 +++++++++++++++++--
+ src/log.c                      | 145 ++++++++++++++++++++++---
  src/log.h                      |   6 ++
- src/main.c                     |  95 ++++++++++++++--
+ src/main.c                     | 114 ++++++++++++++++++--
  src/netconf.c                  |  96 +++++++++++++----
  src/netconf_server.c           | 191 +++++++++++++++++++++++++++++++++
  src/netconf_server.h           |  11 ++
  src/netconf_server_ssh.c       |   4 +-
- 12 files changed, 533 insertions(+), 50 deletions(-)
+ 12 files changed, 581 insertions(+), 56 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..44355b0 100644
@@ -193,7 +195,7 @@ index 02ef4ba..27e08e2 100644
 
  error:
 diff --git a/src/log.c b/src/log.c
-index 4260108..6b49b47 100644
+index 4260108..85612a8 100644
 --- a/src/log.c
 +++ b/src/log.c
 @@ -17,6 +17,7 @@
@@ -223,9 +225,39 @@ index 4260108..6b49b47 100644
  volatile uint8_t np2_verbose_level;
  uint8_t np2_libssh_verbose_level;
  uint8_t np2_sr_verbose_level;
-@@ -44,7 +52,23 @@ np2log(int priority, const char *src, const char *fmt, ...)
+@@ -37,43 +45,98 @@ static void
+ np2log(int priority, const char *src, const char *fmt, ...)
+ {
+     char *format;
++    char* message;
+     va_list ap;
++    va_list ap_copy_size;
+
+     va_start(ap, fmt);
+-    vsyslog(priority, fmt, ap);
++    va_copy(ap_copy_size, ap);
++
++    // Get size of the message
++    int needed = vsnprintf(NULL, 0, fmt, ap_copy_size);
++    va_end(ap_copy_size);
++    if (needed < 0) {
++        fprintf(stderr, "[ERR]: Unable to get msg arguments (%s:%d), src: %s, fmt: %s\n", __FILE__, __LINE__, src, fmt);
++        va_end(ap);
++        return;
++    }
++    // Allocate buffer for the formatted message
++    message = malloc(needed + 1);
++    if (!message) {
++        fprintf(stderr, "[ERR]: Memory allocation failed (%s:%d), src: %s, fmt: %s\n", __FILE__, __LINE__, src, fmt);
++        return;
++    }
++    // Copy message arguments into message
++    vsnprintf(message, needed + 1, fmt, ap);
      va_end(ap);
 
++    // Print into syslog
++    syslog(priority, "%s", message);
++
      if (np2_stderr_log) {
 -        format = malloc(11 + strlen(fmt) + 2);
 +        pthread_t thread_id = pthread_self();
@@ -233,45 +265,51 @@ index 4260108..6b49b47 100644
 +        struct timeval tv;
 +        struct tm * timeinfo;
 +
-+        // Get the current time
++        // Get timestamp
 +        gettimeofday(&tv, NULL);
 +        timeinfo = localtime(&tv.tv_sec);
-+
 +        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", timeinfo);
 +        snprintf(
 +            timestamp + strlen(timestamp),
 +            sizeof(timestamp) - strlen(timestamp),
 +            ".%06ld", tv.tv_usec); // add microseconds
 +
-+        size_t bufferSize = snprintf(NULL, 0, "[%s] [tid: %lu] [UNK]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt) + 1;
++        // Now add timestamp, threadID and priority level
++        size_t bufferSize = snprintf(NULL, 0, "[%s] [tid: %lu] [UNK]: %s: %s\n", timestamp, (unsigned long)thread_id, src, message) + 1;
 +        format = malloc(bufferSize);
          if (!format) {
-             fprintf(stderr, "[ERR]: Memory allocation failed (%s:%d), src: %s, fmt: %s\n", __FILE__, __LINE__, src, fmt);
+-            fprintf(stderr, "[ERR]: Memory allocation failed (%s:%d), src: %s, fmt: %s\n", __FILE__, __LINE__, src, fmt);
++            fprintf(stderr, "[ERR]: Memory allocation failed (%s:%d), src: %s, message: %s\n", __FILE__, __LINE__, src, message);
++            free(message);
              return;
-@@ -52,21 +76,38 @@ np2log(int priority, const char *src, const char *fmt, ...)
+         }
 
          switch (priority) {
          case LOG_ERR:
 -            sprintf(format, "[ERR]: %s: %s\n", src, fmt);
-+            snprintf(format, bufferSize, "[%s] [tid: %lu] [ERR]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [ERR]: %s: %s\n", timestamp, (unsigned long)thread_id, src, message);
              break;
          case LOG_WARNING:
 -            sprintf(format, "[WRN]: %s: %s\n", src, fmt);
-+            snprintf(format, bufferSize, "[%s] [tid: %lu] [WRN]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [WRN]: %s: %s\n", timestamp, (unsigned long)thread_id, src, message);
              break;
          case LOG_INFO:
 -            sprintf(format, "[INF]: %s: %s\n", src, fmt);
-+            snprintf(format, bufferSize, "[%s] [tid: %lu] [INF]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [INF]: %s: %s\n", timestamp, (unsigned long)thread_id, src, message);
              break;
          case LOG_DEBUG:
 -            sprintf(format, "[DBG]: %s: %s\n", src, fmt);
-+            snprintf(format, bufferSize, "[%s] [tid: %lu] [DBG]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
-+            break;
-+        default:
-+            snprintf(format, bufferSize, "[%s] [tid: %lu] [UNK]: %s: %s\n", timestamp, (unsigned long)thread_id, src, fmt);
-+            break;
-+        }
-+
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [DBG]: %s: %s\n", timestamp, (unsigned long)thread_id, src, message);
+             break;
+         default:
+-            sprintf(format, "[UNK]: %s: %s\n", src, fmt);
++            snprintf(format, bufferSize, "[%s] [tid: %lu] [UNK]: %s: %s\n", timestamp, (unsigned long)thread_id, src, message);
+             break;
+         }
+
+-        va_start(ap, fmt);
+-        vfprintf(stderr, format, ap);
+-        va_end(ap);
 +#ifdef DIAG_LOGGING
 +        switch (priority) {
 +        case LOG_ERR:
@@ -282,17 +320,22 @@ index 4260108..6b49b47 100644
 +            break;
 +        case LOG_INFO:
 +            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_MED, "NP2: %s", format);
-             break;
-         default:
--            sprintf(format, "[UNK]: %s: %s\n", src, fmt);
++            break;
++        default:
 +            MSG_SPRINTF_1(MSG_SSID_CSM_ORAN_MPLANE_RU_NP, MSG_LEGACY_LOW, "NP2: %s", format);
-             break;
-         }
++            break;
++        }
 +#endif
++
++        fprintf(stderr, "%s", format);
 
-         va_start(ap, fmt);
-         vfprintf(stderr, format, ap);
-@@ -236,6 +277,61 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
+         free(format);
+     }
++    free(message);
+ }
+
+ /**
+@@ -236,6 +299,64 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
      free(buf);
  }
 
@@ -316,8 +359,11 @@ index 4260108..6b49b47 100644
 +
 +    /* For debug purposes, print the message in yellow to distinquish SSH log
 +     * messages from other OSS component log messages. */
++
++     /* Removing the colors as we print into a file
 +    const char* yellow = "\033[0;33m";
 +    const char* reset = "\033[0m";
++    */
 +
 +    /* SSH log levels are:
 +     * SSH_LOG_NOLOG - No logging at all
@@ -347,7 +393,7 @@ index 4260108..6b49b47 100644
 +        break;
 +    }
 +
-+    np2log(np2_priority, "SH", "%s%s%s", yellow, buffer, reset);
++    np2log(np2_priority, "SH", "%s: %s", function, buffer);
 +}
 +
 +
@@ -370,7 +416,7 @@ index 66262e4..b98e337 100644
 +
  #endif /* NP2SRV_LOG_H_ */
 diff --git a/src/main.c b/src/main.c
-index d1abcdb..d54eb92 100644
+index d1abcdb..646d982 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -34,11 +34,13 @@
@@ -399,16 +445,21 @@ index d1abcdb..d54eb92 100644
  /** @brief flag for main loop */
  ATOMIC_T loop_continue = 1;
 
-@@ -744,6 +751,8 @@ server_rpc_subscribe(void)
+@@ -744,6 +751,13 @@ server_rpc_subscribe(void)
      const char *xpath;
      int rc;
 
 +    /* Set the Max Call home callback */
 +    nc_server_update_max_call_home_clb(call_home_attempts_exceeded_clb);
++
++    // Provide np2log_cb_sh to libnetconf, to let him configure it on
++    // callhome thread
++    nc_server_np2_log_sh_clb(np2log_cb_sh);
++
  #define SR_RPC_SUBSCR(xpath, cb) \
      rc = sr_rpc_subscribe_tree(np2srv.sr_sess, xpath, cb, NULL, 0, SR_SUBSCR_CTX_REUSE, &np2srv.sr_rpc_sub); \
      if (rc != SR_ERR_OK) { \
-@@ -756,13 +765,13 @@ server_rpc_subscribe(void)
+@@ -756,13 +770,13 @@ server_rpc_subscribe(void)
          EINT;
          goto error;
      }
@@ -425,7 +476,7 @@ index d1abcdb..d54eb92 100644
      /* keep close-session empty so that internal lnc2 callback is used */
      SR_RPC_SUBSCR("/ietf-netconf:kill-session", np2srv_rpc_kill_cb);
      SR_RPC_SUBSCR("/ietf-netconf:commit", np2srv_rpc_commit_cb);
-@@ -934,8 +943,30 @@ server_data_subscribe(void)
+@@ -934,8 +948,30 @@ server_data_subscribe(void)
      mod_name = "ietf-truststore";
      xpath = "/ietf-truststore:truststore/certificates";
      SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_dummy_cb);
@@ -456,7 +507,7 @@ index d1abcdb..d54eb92 100644
      /*
       * ietf-netconf-acm
       */
-@@ -978,6 +1009,9 @@ worker_thread(void *arg)
+@@ -978,6 +1014,9 @@ worker_thread(void *arg)
 
  #ifdef NC_ENABLED_SSH
      nc_libssh_thread_verbosity(np2_libssh_verbose_level);
@@ -466,7 +517,7 @@ index d1abcdb..d54eb92 100644
  #endif
 
      while (ATOMIC_LOAD_RELAXED(loop_continue)) {
-@@ -1098,6 +1132,39 @@ main(int argc, char *argv[])
+@@ -1098,6 +1137,39 @@ main(int argc, char *argv[])
      openlog("netopeer2-server", LOG_PID, LOG_DAEMON);
      np2_stderr_log = 1;
 
@@ -506,7 +557,13 @@ index d1abcdb..d54eb92 100644
      /* process command line options */
      while ((c = getopt(argc, argv, "dhVp:U::m:u:g:t:v:c:")) != -1) {
          switch (c) {
-@@ -1120,21 +1187,26 @@ main(int argc, char *argv[])
+@@ -1116,25 +1188,42 @@ main(int argc, char *argv[])
+
+             c = atoi(optarg);
+             /* normalize verbose level */
+-            np2_verbose_level = (c > NC_VERB_ERROR) ? ((c > NC_VERB_VERBOSE) ? NC_VERB_VERBOSE : c) : NC_VERB_ERROR;
++            // Change from mainline to enable also debug lvl
++            np2_verbose_level = (c > NC_VERB_DEBUG_LOWLVL) ? NC_VERB_DEBUG_LOWLVL : c;
              switch (np2_verbose_level) {
              case NC_VERB_ERROR:
                  np2_sr_verbose_level = SR_LL_ERR;
@@ -522,7 +579,18 @@ index d1abcdb..d54eb92 100644
                  np2_sr_verbose_level = SR_LL_INF;
 -                np2_libssh_verbose_level = 1;
 +                np2_libssh_verbose_level = SSH_LOG_PROTOCOL;
++                break;
++            // Adding DEBUG and DEBUG_LOWLVL level
++            case NC_VERB_DEBUG:
++                np2_sr_verbose_level = SR_LL_DBG;
++                np2_libssh_verbose_level = SSH_LOG_PACKET;
++                break;
++            case NC_VERB_DEBUG_LOWLVL:
++                np2_sr_verbose_level = SR_LL_DBG;
++                np2_libssh_verbose_level = SSH_LOG_FUNCTIONS;
                  break;
++            default:
++                ERR("Unknown log level %d", np2_verbose_level);
              }
 
              nc_verbosity(np2_verbose_level);
@@ -536,7 +604,7 @@ index d1abcdb..d54eb92 100644
  #endif
              break;
          case 'V':
-@@ -1307,6 +1379,12 @@ main(int argc, char *argv[])
+@@ -1307,6 +1396,12 @@ main(int argc, char *argv[])
      ly_set_log_clb(np2log_cb_ly, 1); /* libyang */
      sr_log_set_cb(np2log_cb_sr); /* sysrepo, log level is checked by callback */
 
@@ -549,7 +617,7 @@ index d1abcdb..d54eb92 100644
      /* initiate NETCONF server */
      if (server_init()) {
          ret = EXIT_FAILURE;
-@@ -1379,5 +1457,10 @@ cleanup:
+@@ -1379,5 +1474,10 @@ cleanup:
      /* removes the context and clears all the sessions */
      sr_disconnect(np2srv.sr_conn);
 
@@ -1006,5 +1074,5 @@ index 1cfd3fa..f040d99 100644
              goto cleanup;
          }
 --
-2.17.1
+2.43.0
 

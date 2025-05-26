@@ -1,10 +1,12 @@
 From 142636cce280cceae1f4f2c2e951d4f28138016e Mon Sep 17 00:00:00 2001
 From: Rishi Singh <quic_rishikan@quicinc.com>
 Date: Wed, 5 Mar 2025 15:20:59 +0100
-From c80e8f2d06ccd6c9da4893ae9882cf8f1e95aac2 Mon Sep 17 00:00:00 2001
+From 27b1ba6d7bd27de6973d7fe91142a5a3542b28a2 Mon Sep 17 00:00:00 2001
 From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Fri, 25 Apr 2025 07:51:49 +0200
+Date: Mon, 26 May 2025 07:58:06 +0200
 Subject: [PATCH] Mplane changes
+
+Add setlevel and log callback for libssh on call-home thread
 
 Add sleep of 500ms before starting call home thread
 
@@ -50,15 +52,15 @@ Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
 
 Signed-off-by: Rishi Singh <quic_rishikan@quicinc.com>
 ---
- src/io.c                 |  17 ++-
- src/session_client.c     |  44 +++++-
+ src/io.c                 |  17 +-
+ src/session_client.c     |  44 ++++-
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
  src/session_p.h          |  12 +-
- src/session_server.c     | 315 ++++++++++++++++++++++++++++++++++++++-
- src/session_server.h     |  54 +++++++
- src/session_server_ch.h  |  35 +++++
- 8 files changed, 465 insertions(+), 18 deletions(-)
+ src/session_server.c     | 338 +++++++++++++++++++++++++++++++++++++--
+ src/session_server.h     |  63 ++++++++
+ src/session_server_ch.h  |  35 ++++
+ 8 files changed, 496 insertions(+), 19 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..d082b8e 100644
@@ -285,10 +287,10 @@ index 4e1346e..d5ad175 100644
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..478f96e 100644
+index 6025f39..4f9d24f 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
-@@ -31,18 +31,28 @@
+@@ -31,20 +31,31 @@
  #include <time.h>
  #include <signal.h>
  #include <pwd.h>
@@ -317,8 +319,34 @@ index 6025f39..478f96e 100644
 +    .max_call_home_attempts = DEFAULT_MAX_CALL_HOME_ATTEMPTS
  };
 
++static ssh_logging_callback nc_np2_log_sh_clb = NULL;
  static nc_rpc_clb global_rpc_clb = NULL;
-@@ -2390,6 +2400,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
+
+ struct nc_endpt *
+@@ -882,8 +893,10 @@ nc_ps_lock(struct nc_pollsession *ps, uint8_t *id, const char *func)
+
+     /* add ourselves into the queue */
+     nc_ps_queue_add_id(ps, id);
++    /* Remove this print to avoid flood
+     DBL("PS 0x%p TID %lu queue: added %u, head %u, lenght %u", ps, (long unsigned int)pthread_self(), *id,
+             ps->queue[ps->queue_begin], ps->queue_len);
++    */
+
+     /* is it our turn? */
+     while (ps->queue[ps->queue_begin] != *id) {
+@@ -943,9 +956,10 @@ nc_ps_unlock(struct nc_pollsession *ps, uint8_t id, const char *func)
+
+     /* remove ourselves from the queue */
+     nc_ps_queue_remove_id(ps, id);
++    /* Removing this print to avoid flood on the logs
+     DBL("PS 0x%p TID %lu queue: removed %u, head %u, lenght %u", ps, (long unsigned int)pthread_self(), id,
+             ps->queue[ps->queue_begin], ps->queue_len);
+-
++    */
+     /* broadcast to all other threads that the queue moved */
+     pthread_cond_broadcast(&ps->cond);
+
+@@ -2390,6 +2404,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
          for (i = 0; i < client->ch_endpt_count; ++i) {
              lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
              lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
@@ -326,7 +354,7 @@ index 6025f39..478f96e 100644
              if (client->ch_endpts[i].sock_pending != -1) {
                  close(client->ch_endpts[i].sock_pending);
              }
-@@ -2422,6 +2433,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
+@@ -2422,6 +2437,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
              if (!strcmp(client->ch_endpts[i].name, endpt_name) && (!ti || (ti == client->ch_endpts[i].ti))) {
                  lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
                  lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
@@ -334,7 +362,7 @@ index 6025f39..478f96e 100644
                  if (client->ch_endpts[i].sock_pending != -1) {
                      close(client->ch_endpts[i].sock_pending);
                  }
-@@ -2779,6 +2791,60 @@ nc_server_ch_client_endpt_set_address(const char *client_name, const char *endpt
+@@ -2779,6 +2795,60 @@ nc_server_ch_client_endpt_set_address(const char *client_name, const char *endpt
      return 0;
  }
 
@@ -395,7 +423,7 @@ index 6025f39..478f96e 100644
  API int
  nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_name, uint16_t port)
  {
-@@ -2810,6 +2876,34 @@ nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_na
+@@ -2810,6 +2880,34 @@ nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_na
      return 0;
  }
 
@@ -430,7 +458,7 @@ index 6025f39..478f96e 100644
  API int
  nc_server_ch_client_endpt_enable_keepalives(const char *client_name, const char *endpt_name, int enable)
  {
-@@ -3075,10 +3169,27 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
+@@ -3075,10 +3173,27 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
      struct timespec ts_cur;
      char *ip_host;
 
@@ -459,7 +487,7 @@ index 6025f39..478f96e 100644
      /* no need to store the socket as pending any longer */
      endpt->sock_pending = -1;
 
-@@ -3269,12 +3380,49 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
+@@ -3269,12 +3384,49 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
      return ret;
  }
 
@@ -509,14 +537,25 @@ index 6025f39..478f96e 100644
      uint16_t next_endpt_index;
      char *cur_endpt_name = NULL;
      struct nc_ch_endpt *cur_endpt;
-@@ -3283,11 +3431,20 @@ nc_ch_client_thread(void *arg)
+@@ -3283,11 +3435,31 @@ nc_ch_client_thread(void *arg)
      uint32_t client_id;
      time_t reconnect_in;
 
 +    // Add this ru_controller to the counter
 +    atomic_fetch_add(&g_ru_controller_counter, 1);
 +
-+    VRB("Sleeping 500ms waiting subscription to sysrepo is done");
++    // libssh log callback and level are set per thread. So we need to set it
++    //  on this callhome thread
++    ssh_set_log_level(verbose_level); // Set log level for libssh
++    if (nc_np2_log_sh_clb)
++    {
++        // Set the log callback for libssh
++        if(ssh_set_log_callback(nc_np2_log_sh_clb)) {
++            ERR("Failed to set LibSSH log callback function.");
++        }
++    }
++
++    VRB("Sleeping 500ms to wait subscription to sysrepo is done");
 +    usleep(500000);
 +    uint16_t re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
 +    uint8_t max_call_home_attempts = nc_server_get_max_call_home_attempts();
@@ -530,7 +569,7 @@ index 6025f39..478f96e 100644
      client_id = client->id;
 
      cur_endpt = &client->ch_endpts[0];
-@@ -3298,22 +3455,35 @@ nc_ch_client_thread(void *arg)
+@@ -3298,22 +3470,35 @@ nc_ch_client_thread(void *arg)
          msgtype = nc_connect_ch_endpt(cur_endpt, &session);
 
          if (msgtype == NC_MSG_HELLO) {
@@ -568,7 +607,7 @@ index 6025f39..478f96e 100644
                  goto cleanup;
              }
 
-@@ -3330,10 +3500,12 @@ nc_ch_client_thread(void *arg)
+@@ -3330,10 +3515,12 @@ nc_ch_client_thread(void *arg)
                  /* LOCK */
                  client = nc_server_ch_client_with_endpt_lock(data->client_name);
                  if (!client) {
@@ -581,7 +620,7 @@ index 6025f39..478f96e 100644
                      goto cleanup;
                  }
              }
-@@ -3356,21 +3528,25 @@ nc_ch_client_thread(void *arg)
+@@ -3356,21 +3543,25 @@ nc_ch_client_thread(void *arg)
                  /* just get a random index */
                  next_endpt_index = rand() % client->ch_endpt_count;
              }
@@ -610,7 +649,7 @@ index 6025f39..478f96e 100644
                  goto cleanup;
              }
 
-@@ -3404,8 +3580,36 @@ nc_ch_client_thread(void *arg)
+@@ -3404,8 +3595,36 @@ nc_ch_client_thread(void *arg)
          cur_endpt = &client->ch_endpts[next_endpt_index];
          free(cur_endpt_name);
          cur_endpt_name = strdup(cur_endpt->name);
@@ -648,7 +687,7 @@ index 6025f39..478f96e 100644
  cleanup:
      VRB("Call Home client \"%s\" thread exit.", data->client_name);
      free(cur_endpt_name);
-@@ -3506,3 +3710,98 @@ nc_session_is_callhome(const struct nc_session *session)
+@@ -3506,3 +3725,104 @@ nc_session_is_callhome(const struct nc_session *session)
 
      return 0;
  }
@@ -747,11 +786,17 @@ index 6025f39..478f96e 100644
 +    }
 +    return 0;
 +}
++
++
++API void nc_server_np2_log_sh_clb(ssh_logging_callback clb)
++{
++    nc_np2_log_sh_clb = clb;
++}
 diff --git a/src/session_server.h b/src/session_server.h
-index df7b075..de0c998 100644
+index df7b075..822a544 100644
 --- a/src/session_server.h
 +++ b/src/session_server.h
-@@ -904,6 +904,60 @@ int nc_session_get_notif_status(const struct nc_session *session);
+@@ -904,6 +904,69 @@ int nc_session_get_notif_status(const struct nc_session *session);
   */
  int nc_session_is_callhome(const struct nc_session *session);
 
@@ -773,6 +818,15 @@ index df7b075..de0c998 100644
 +
 +void nc_server_update_max_call_home_clb(nc_server_ch_exceeded_clb clb);
 +void nc_server_update_max_call_home_attempts(uint8_t value);
++
++/**
++ * @brief Store netopeer2 callback for ssh, as we will set it for call-home
++ * thread
++ *
++ * @param[in] clb np2 clb for log ssh
++ */
++void nc_server_np2_log_sh_clb(ssh_logging_callback clb);
++
 +
 +/**
 + * @brief Get the re_callhome_no_ssh_timer
@@ -859,5 +913,5 @@ index c40ccc1..23360d2 100644
   * @brief Change Call Home client endpoint keepalives state. Affects only new connections.
   *
 --
-2.17.1
+2.43.0
 
