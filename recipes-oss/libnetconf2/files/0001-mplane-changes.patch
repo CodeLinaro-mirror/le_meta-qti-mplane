@@ -1,10 +1,12 @@
-From 142636cce280cceae1f4f2c2e951d4f28138016e Mon Sep 17 00:00:00 2001
-From: Rishi Singh <quic_rishikan@quicinc.com>
-Date: Wed, 5 Mar 2025 15:20:59 +0100
-From 27b1ba6d7bd27de6973d7fe91142a5a3542b28a2 Mon Sep 17 00:00:00 2001
+This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
+Copyright (c) 2025 Qualcomm Innovation Center, Inc. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+From 760c78999cb4fba5b90d323d11c65b173c90b6dd Mon Sep 17 00:00:00 2001
 From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Mon, 26 May 2025 07:58:06 +0200
+Date: Fri, 6 Jun 2025 08:28:11 +0200
 Subject: [PATCH] Mplane changes
+
+Doesn't use sock_pending when select() timed out
 
 Add setlevel and log callback for libssh on call-home thread
 
@@ -53,14 +55,14 @@ Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
 Signed-off-by: Rishi Singh <quic_rishikan@quicinc.com>
 ---
  src/io.c                 |  17 +-
- src/session_client.c     |  44 ++++-
+ src/session_client.c     |  54 +++++--
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
  src/session_p.h          |  12 +-
  src/session_server.c     | 338 +++++++++++++++++++++++++++++++++++++--
  src/session_server.h     |  63 ++++++++
  src/session_server_ch.h  |  35 ++++
- 8 files changed, 496 insertions(+), 19 deletions(-)
+ 8 files changed, 498 insertions(+), 27 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..d082b8e 100644
@@ -105,7 +107,7 @@ index 252a8b4..d082b8e 100644
 
      nc_write_error_elem(arg, "error-type", 10, prefix, pref_len, 1, 0);
 diff --git a/src/session_client.c b/src/session_client.c
-index 941f872..62e128c 100644
+index 941f872..52c08d4 100644
 --- a/src/session_client.c
 +++ b/src/session_client.c
 @@ -116,6 +116,8 @@ nc_client_context_free(void *ptr)
@@ -167,7 +169,24 @@ index 941f872..62e128c 100644
          /* non-blocking connect! */
          if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
              if (errno != EINPROGRESS) {
-@@ -1354,7 +1390,7 @@ cleanup:
+@@ -1307,14 +1343,8 @@ _non_blocking_connect(int timeout, int *sock_pending, struct addrinfo *res, stru
+
+     if (ret == 0) {
+         /* there was a timeout */
+-        VRB("Timed out after %ds (%s).", timeout, strerror(errno));
+-        if (sock_pending) {
+-            /* no sock-close, we'll try it again */
+-            *sock_pending = sock;
+-        } else {
+-            close(sock);
+-        }
+-        return -1;
++        VRB("Timed out after %d.", timeout);
++        goto cleanup;
+     }
+
+     /* check the usability of the socket */
+@@ -1354,7 +1384,7 @@ cleanup:
     has to be invoked, until it returns a valid socket.
   */
  int
@@ -176,7 +195,7 @@ index 941f872..62e128c 100644
  {
      int i, opt;
      int sock = sock_pending ? *sock_pending : -1;
-@@ -1379,7 +1415,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
+@@ -1379,7 +1409,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
          }
 
          for (res = res_list; res != NULL; res = res->ai_next) {
@@ -185,7 +204,7 @@ index 941f872..62e128c 100644
              if (sock == -1) {
                  if (!sock_pending || *sock_pending == -1) {
                      /* try the next resource */
-@@ -1423,7 +1459,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
+@@ -1423,7 +1453,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
      } else {
          /* try to get a connection with the pending socket */
          assert(sock_pending);
@@ -287,7 +306,7 @@ index 4e1346e..d5ad175 100644
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..4f9d24f 100644
+index 6025f39..1331a28 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
 @@ -31,20 +31,31 @@
