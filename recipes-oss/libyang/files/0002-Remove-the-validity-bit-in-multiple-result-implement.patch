@@ -5,15 +5,32 @@ Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
 
 From b9f3f01785d79d2564e987eb09b6f5d74c648b15 Mon Sep 17 00:00:00 2001
-From: Balram Panwar <quic_panwar@quicinc.com>
-Date: Tue, 14 May 2024 12:01:54 -0700
+From: Rishabh Kothari <quic_rishkoth@quicinc.com>
+Date: Wed, 25 Jun 2025 11:20:19 +0200
 Subject: [PATCH] Remove the validity bit in multiple result implementation
 
-Signed-off-by: Balram Panwar <quic_panwar@quicinc.com>
----
- src/tree_data.c | 2 --
- 1 file changed, 2 deletions(-)
+Log leafref errors as warning
 
+Signed-off-by: Rishabh Kothari <quic_rishkoth@quicinc.com>
+---
+src/log.c       | 3 +++
+src/tree_data.c | 2 --
+2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/src/log.c b/src/log.c
+index 050bc3bc3..860f1cd92 100644
+--- a/src/log.c
++++ b/src/log.c
+@@ -886,6 +886,9 @@ ly_vlog(const struct ly_ctx *ctx, LY_ECODE ecode, enum LY_VLOG_ELEM elem_type, c
+         assert(path);
+         log_vprintf(ctx, LY_LLERR, LY_EVALID, LYVE_SUCCESS, path, NULL, ap);
+         break;
++    case LYE_NOLEAFREF:
++        log_vprintf(ctx, LY_LLWRN, LY_EVALID, ecode2vecode[ecode], path, ly_errs[ecode], ap);
++        break;
+     default:
+         log_vprintf(ctx, LY_LLERR, LY_EVALID, ecode2vecode[ecode], path, ly_errs[ecode], ap);
+         break;
 diff --git a/src/tree_data.c b/src/tree_data.c
 index 14dd83761..3df9c6ccb 100644
 --- a/src/tree_data.c
@@ -27,6 +44,5 @@ index 14dd83761..3df9c6ccb 100644
                      }
                  } else if (elem2->schema->nodetype & LYS_ANYDATA) {
                      if (!lyd_anydata_equal(elem1, elem2)) {
--- 
-2.17.1
-
+--
+2.25.1

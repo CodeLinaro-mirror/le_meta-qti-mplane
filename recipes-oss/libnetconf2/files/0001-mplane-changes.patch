@@ -1,10 +1,12 @@
-From 142636cce280cceae1f4f2c2e951d4f28138016e Mon Sep 17 00:00:00 2001
-From: Rishi Singh <quic_rishikan@quicinc.com>
-Date: Wed, 5 Mar 2025 15:20:59 +0100
-From 27b1ba6d7bd27de6973d7fe91142a5a3542b28a2 Mon Sep 17 00:00:00 2001
+This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
+Copyright (c) 2025 Qualcomm Innovation Center, Inc. All rights reserved.
+SPDX-License-Identifier: BSD-3-Clause-Clear
+From 69ec64e7ec6475786902777effc0ab7ac169e7a8 Mon Sep 17 00:00:00 2001
 From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Mon, 26 May 2025 07:58:06 +0200
+Date: Fri, 6 Jun 2025 10:50:22 +0200
 Subject: [PATCH] Mplane changes
+
+Doesn't use sock_pending when select() timed out
 
 Add setlevel and log callback for libssh on call-home thread
 
@@ -53,14 +55,14 @@ Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
 Signed-off-by: Rishi Singh <quic_rishikan@quicinc.com>
 ---
  src/io.c                 |  17 +-
- src/session_client.c     |  44 ++++-
+ src/session_client.c     |  54 ++++--
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
  src/session_p.h          |  12 +-
- src/session_server.c     | 338 +++++++++++++++++++++++++++++++++++++--
- src/session_server.h     |  63 ++++++++
+ src/session_server.c     | 403 +++++++++++++++++++++++++++++++++++----
+ src/session_server.h     |  63 ++++++
  src/session_server_ch.h  |  35 ++++
- 8 files changed, 496 insertions(+), 19 deletions(-)
+ 8 files changed, 534 insertions(+), 56 deletions(-)
 
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..d082b8e 100644
@@ -105,7 +107,7 @@ index 252a8b4..d082b8e 100644
 
      nc_write_error_elem(arg, "error-type", 10, prefix, pref_len, 1, 0);
 diff --git a/src/session_client.c b/src/session_client.c
-index 941f872..62e128c 100644
+index 941f872..52c08d4 100644
 --- a/src/session_client.c
 +++ b/src/session_client.c
 @@ -116,6 +116,8 @@ nc_client_context_free(void *ptr)
@@ -167,7 +169,24 @@ index 941f872..62e128c 100644
          /* non-blocking connect! */
          if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
              if (errno != EINPROGRESS) {
-@@ -1354,7 +1390,7 @@ cleanup:
+@@ -1307,14 +1343,8 @@ _non_blocking_connect(int timeout, int *sock_pending, struct addrinfo *res, stru
+
+     if (ret == 0) {
+         /* there was a timeout */
+-        VRB("Timed out after %ds (%s).", timeout, strerror(errno));
+-        if (sock_pending) {
+-            /* no sock-close, we'll try it again */
+-            *sock_pending = sock;
+-        } else {
+-            close(sock);
+-        }
+-        return -1;
++        VRB("Timed out after %d.", timeout);
++        goto cleanup;
+     }
+
+     /* check the usability of the socket */
+@@ -1354,7 +1384,7 @@ cleanup:
     has to be invoked, until it returns a valid socket.
   */
  int
@@ -176,7 +195,7 @@ index 941f872..62e128c 100644
  {
      int i, opt;
      int sock = sock_pending ? *sock_pending : -1;
-@@ -1379,7 +1415,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
+@@ -1379,7 +1409,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
          }
 
          for (res = res_list; res != NULL; res = res->ai_next) {
@@ -185,7 +204,7 @@ index 941f872..62e128c 100644
              if (sock == -1) {
                  if (!sock_pending || *sock_pending == -1) {
                      /* try the next resource */
-@@ -1423,7 +1459,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
+@@ -1423,7 +1453,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
      } else {
          /* try to get a connection with the pending socket */
          assert(sock_pending);
@@ -287,7 +306,7 @@ index 4e1346e..d5ad175 100644
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..4f9d24f 100644
+index 6025f39..8f017fe 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
 @@ -31,20 +31,31 @@
@@ -487,7 +506,7 @@ index 6025f39..4f9d24f 100644
      /* no need to store the socket as pending any longer */
      endpt->sock_pending = -1;
 
-@@ -3269,12 +3384,49 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
+@@ -3269,12 +3384,50 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
      return ret;
  }
 
@@ -527,20 +546,26 @@ index 6025f39..4f9d24f 100644
 +    return 0;
 +}
 +
++
  static void *
  nc_ch_client_thread(void *arg)
  {
      struct nc_ch_client_thread_arg *data = (struct nc_ch_client_thread_arg *)arg;
      NC_MSG_TYPE msgtype;
-     uint8_t cur_attempts = 0;
-+    uint8_t total_attempts = 0;
+-    uint8_t cur_attempts = 0;
++    uint8_t total_attempts_per_endpoint = 0;
++    uint8_t total_attempts_per_client = 0;
      uint16_t next_endpt_index;
      char *cur_endpt_name = NULL;
      struct nc_ch_endpt *cur_endpt;
-@@ -3283,11 +3435,31 @@ nc_ch_client_thread(void *arg)
+@@ -3283,40 +3436,78 @@ nc_ch_client_thread(void *arg)
      uint32_t client_id;
      time_t reconnect_in;
 
+-    /* LOCK */
+-    client = nc_server_ch_client_with_endpt_lock(data->client_name);
+-    if (!client) {
+-        goto cleanup;
 +    // Add this ru_controller to the counter
 +    atomic_fetch_add(&g_ru_controller_counter, 1);
 +
@@ -553,28 +578,36 @@ index 6025f39..4f9d24f 100644
 +        if(ssh_set_log_callback(nc_np2_log_sh_clb)) {
 +            ERR("Failed to set LibSSH log callback function.");
 +        }
-+    }
-+
-+    VRB("Sleeping 500ms to wait subscription to sysrepo is done");
+     }
+-    client_id = client->id;
+
+-    cur_endpt = &client->ch_endpts[0];
+-    cur_endpt_name = strdup(cur_endpt->name);
++    VRB("Sleeping 500ms waiting subscription to sysrepo is done");
 +    usleep(500000);
++
 +    uint16_t re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
 +    uint8_t max_call_home_attempts = nc_server_get_max_call_home_attempts();
-+
-     /* LOCK */
-     client = nc_server_ch_client_with_endpt_lock(data->client_name);
-     if (!client) {
-         goto cleanup;
-     }
-+
-     client_id = client->id;
 
-     cur_endpt = &client->ch_endpts[0];
-@@ -3298,22 +3470,35 @@ nc_ch_client_thread(void *arg)
+-    VRB("Call Home client \"%s\" connecting...", data->client_name);
+     while (1) {
++        /* LOCK */
++        client = nc_server_ch_client_with_endpt_lock(data->client_name);
++        if (!client) {
++            goto cleanup;
++        }
++
++        client_id = client->id;
++
++        cur_endpt = &client->ch_endpts[0];
++        cur_endpt_name = strdup(cur_endpt->name);
++
++        VRB("Call Home client \"%s\" connecting to %s...", data->client_name, cur_endpt->address);
          msgtype = nc_connect_ch_endpt(cur_endpt, &session);
 
          if (msgtype == NC_MSG_HELLO) {
 +            /* Connection was made, clear the attempt counter */
-+            total_attempts = 0;
++            total_attempts_per_client = 0;
              /* UNLOCK */
              nc_server_ch_client_unlock(client);
 
@@ -585,6 +618,8 @@ index 6025f39..4f9d24f 100644
 +                data->client_name,
 +                session->id,
 +                atomic_load(&g_ru_controller_counter));
++
++            // Blocking call until the session disconnects
              if (nc_server_ch_client_thread_session_cond_wait(session, data)) {
 +                atomic_fetch_sub(&g_ru_controller_counter, 1);
                  goto cleanup;
@@ -607,7 +642,12 @@ index 6025f39..4f9d24f 100644
                  goto cleanup;
              }
 
-@@ -3330,10 +3515,12 @@ nc_ch_client_thread(void *arg)
++            // This part is regarding connection type periodic which is not required
++
+             /* session changed status -> it was disconnected for whatever reason,
+              * persistent connection immediately tries to reconnect, periodic connects at specific times */
+             if (client->conn_type == NC_CH_PERIOD) {
+@@ -3330,13 +3521,15 @@ nc_ch_client_thread(void *arg)
                  /* LOCK */
                  client = nc_server_ch_client_with_endpt_lock(data->client_name);
                  if (!client) {
@@ -619,42 +659,86 @@ index 6025f39..4f9d24f 100644
 +                    atomic_fetch_sub(&g_ru_controller_counter, 1);
                      goto cleanup;
                  }
-             }
-@@ -3356,21 +3543,25 @@ nc_ch_client_thread(void *arg)
+-            }
++            } // End of NC_CH_PERIOD
+
+             /* set next endpoint to try */
+             if (client->start_with == NC_CH_FIRST_LISTED) {
+@@ -3356,25 +3549,26 @@ nc_ch_client_thread(void *arg)
                  /* just get a random index */
                  next_endpt_index = rand() % client->ch_endpt_count;
              }
 -
          } else {
-+
-+            VRB(
-+                "Number of attempt done: %u, over: %u",
-+                total_attempts,
-+                max_call_home_attempts);
-             /* UNLOCK */
-             nc_server_ch_client_unlock(client);
-
-             /* session was not created */
+-            /* UNLOCK */
+-            nc_server_ch_client_unlock(client);
+-
+-            /* session was not created */
 -            usleep(NC_CH_ENDPT_FAIL_WAIT * 1000);
 -
-             /* LOCK */
-             client = nc_server_ch_client_with_endpt_lock(data->client_name);
-             if (!client) {
-+                atomic_fetch_sub(&g_ru_controller_counter, 1);
-                 goto cleanup;
-             }
-             if (client->id != client_id) {
-                 nc_server_ch_client_unlock(client);
-+                atomic_fetch_sub(&g_ru_controller_counter, 1);
-                 goto cleanup;
-             }
+-            /* LOCK */
+-            client = nc_server_ch_client_with_endpt_lock(data->client_name);
+-            if (!client) {
+-                goto cleanup;
+-            }
+-            if (client->id != client_id) {
+-                nc_server_ch_client_unlock(client);
+-                goto cleanup;
+-            }
+-
+-            ++cur_attempts;
++            /* session was not connected */
++            VRB(
++                "Number of attempt done: %u, over: %u",
++                total_attempts_per_client,
++                max_call_home_attempts);
++            // This counter correspond to the endpoint itself
++            // From ietf-netconf-server yang module:
++            //
++            //  leaf max-attempts {
++            //      type uint8 {
++            //        range "1..max";
++            //      }
++            //      default "3";
++            //      description
++            //        "Specifies the number times the NETCONF server tries
++            //         to connect to a specific endpoint before moving on
++            //         to the next endpoint in the list (round robin).";
++            //    }
++            ++total_attempts_per_endpoint;
 
-@@ -3404,8 +3595,36 @@ nc_ch_client_thread(void *arg)
+             /* try to find our endpoint again */
+             for (next_endpt_index = 0; next_endpt_index < client->ch_endpt_count; ++next_endpt_index) {
+@@ -3386,8 +3580,8 @@ nc_ch_client_thread(void *arg)
+             if (next_endpt_index >= client->ch_endpt_count) {
+                 /* endpoint was removed, start with the first one */
+                 next_endpt_index = 0;
+-                cur_attempts = 0;
+-            } else if (cur_attempts == client->max_attempts) {
++                total_attempts_per_endpoint = 0;
++            } else if (total_attempts_per_endpoint == client->max_attempts) {
+                 /* we have tried to connect to this endpoint enough times */
+                 if (next_endpt_index < client->ch_endpt_count - 1) {
+                     /* just go to the next endpoint */
+@@ -3397,15 +3591,47 @@ nc_ch_client_thread(void *arg)
+                     next_endpt_index = 0;
+                 }
+
+-                cur_attempts = 0;
++                total_attempts_per_endpoint = 0;
+             } /* else we keep the current one */
+-        }
++        } // end of if/else
+
          cur_endpt = &client->ch_endpts[next_endpt_index];
          free(cur_endpt_name);
          cur_endpt_name = strdup(cur_endpt->name);
 -    }
 
++        // Unlock mutex while sleeping
++        /* UNLOCK */
++        nc_server_ch_client_unlock(client);
++
 +        // Update value because it may have been changed by DU
 +        re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
 +        if (re_call_home_no_ssh_timer == 0)
@@ -668,7 +752,7 @@ index 6025f39..4f9d24f 100644
 +        // Check if max call home attempts is reached
 +        //
 +        max_call_home_attempts = nc_server_get_max_call_home_attempts();
-+        if (total_attempts >= max_call_home_attempts)
++        if (total_attempts_per_client >= max_call_home_attempts)
 +        {
 +            // if the maximum number of attempts has been made, exit
 +            // function and O-RAN will not try to connect to this endpoint
@@ -682,12 +766,12 @@ index 6025f39..4f9d24f 100644
 +        re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
 +        // Sleep before retrying the call-home
 +        usleep(re_call_home_no_ssh_timer * NC_CH_ENDPT_FAIL_WAIT * 1000);
-+        total_attempts++;
-+    }
++        total_attempts_per_client++;
++    } // End of while()
  cleanup:
      VRB("Call Home client \"%s\" thread exit.", data->client_name);
      free(cur_endpt_name);
-@@ -3506,3 +3725,104 @@ nc_session_is_callhome(const struct nc_session *session)
+@@ -3506,3 +3732,104 @@ nc_session_is_callhome(const struct nc_session *session)
 
      return 0;
  }
