@@ -1,10 +1,12 @@
 This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
 Copyright (c) 2025 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
-From 69ec64e7ec6475786902777effc0ab7ac169e7a8 Mon Sep 17 00:00:00 2001
-From: Romain Chaumontet <quic_rchaumon@quicinc.com>
-Date: Fri, 6 Jun 2025 10:50:22 +0200
+From 2e3c8b343604ebdfa3a94c98fb89d263de310090 Mon Sep 17 00:00:00 2001
+From: Sanjeev Sharma <sansha@qti.qualcomm.com>
+Date: Tue, 4 Nov 2025 18:26:00 +0530
 Subject: [PATCH] Mplane changes
+
+FR110645 QRU Continuous Logging
 
 Doesn't use sock_pending when select() timed out
 
@@ -54,16 +56,63 @@ Signed-off-by: Romain Chaumontet <quic_rchaumon@quicinc.com>
 
 Signed-off-by: Rishi Singh <quic_rishikan@quicinc.com>
 ---
+ CMakeLists.txt           |  28 +++
  src/io.c                 |  17 +-
- src/session_client.c     |  54 ++++--
+ src/session_client.c     |  54 +++-
  src/session_client_ssh.c |   4 +-
  src/session_client_tls.c |   2 +-
  src/session_p.h          |  12 +-
- src/session_server.c     | 403 +++++++++++++++++++++++++++++++++++----
- src/session_server.h     |  63 ++++++
- src/session_server_ch.h  |  35 ++++
- 8 files changed, 534 insertions(+), 56 deletions(-)
+ src/session_server.c     | 532 ++++++++++++++++++++++++++++++++++++---
+ src/session_server.h     |  95 +++++++
+ src/session_server_ch.h  |  35 +++
+ 9 files changed, 723 insertions(+), 56 deletions(-)
 
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 78ea35b..d7f7494 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -212,6 +212,33 @@ find_package(LibYANG REQUIRED)
+ target_link_libraries(netconf2 ${LIBYANG_LIBRARIES})
+ include_directories(${LIBYANG_INCLUDE_DIRS})
+ 
++# get COMMON_INCLUDE_DIR from environment only if not already set
++if(NOT DEFINED COMMON_INCLUDE_DIR)
++    if(DEFINED ENV{COMMON_INCLUDE_DIR})
++        set(COMMON_INCLUDE_DIR "$ENV{COMMON_INCLUDE_DIR}" CACHE PATH "Path to common/src include directory")
++        message(STATUS "COMMON_INCLUDE_DIR set from environment: ${COMMON_INCLUDE_DIR}")
++    else()
++        message(STATUS "Environment variable COMMON_INCLUDE_DIR is not set")
++    endif()
++endif()
++
++if(NOT COMMON_INCLUDE_DIR)
++    find_path(COMMON_INCLUDE_DIR MPlaneInterface.h
++        PATHS
++            ${CMAKE_CURRENT_SOURCE_DIR}/../../common/src
++        NO_DEFAULT_PATH
++    )
++endif()
++
++# Enforce fatal error if not found
++if(NOT COMMON_INCLUDE_DIR OR NOT EXISTS "${COMMON_INCLUDE_DIR}/MPlaneInterface.h")
++    message(FATAL_ERROR "MPlaneInterface.h not found. Set COMMON_INCLUDE_DIR or ensure it is available before building libnetconf2.")
++endif()
++
++# Apply the include path
++message(STATUS "Using COMMON_INCLUDE_DIR: ${COMMON_INCLUDE_DIR}")
++target_include_directories(netconf2 PUBLIC ${COMMON_INCLUDE_DIR})
++
+ # header file compatibility - shadow.h and crypt.h
+ check_include_file("shadow.h" HAVE_SHADOW)
+ check_include_file("crypt.h" HAVE_CRYPT)
+@@ -251,6 +278,7 @@ install(TARGETS netconf2 DESTINATION ${CMAKE_INSTALL_LIBDIR})
+ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/nc_client.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/nc_server.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+ install(FILES ${headers} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/libnetconf2)
++install(FILES "${COMMON_INCLUDE_DIR}/MPlaneInterface.h" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/libnetconf2")
+ 
+ # install pkg-config file
+ find_package(PkgConfig)
 diff --git a/src/io.c b/src/io.c
 index 252a8b4..d082b8e 100644
 --- a/src/io.c
@@ -71,25 +120,25 @@ index 252a8b4..d082b8e 100644
 @@ -452,7 +452,7 @@ nc_read_msg_io(struct nc_session *session, int io_timeout, struct lyxml_elem **d
      nc_session_io_unlock(session, __func__);
      io_locked = 0;
-
+ 
 -    DBG("Session %u: received message:\n%s\n", session->id, msg);
 +    VRB("Session %u: received message:\n%s\n", session->id, msg);
-
+ 
      /* build XML tree */
      *data = lyxml_parse_mem(session->ctx, msg, LYXML_PARSE_NOMIXEDCONTENT);
 @@ -740,7 +740,7 @@ nc_write(struct nc_session *session, const void *buf, size_t count)
          return -1;
      }
-
+ 
 -    DBG("Session %u: sending message:\n%.*s\n", session->id, count, buf);
 +    VRB("Session %u: sending message:\n%.*s\n", session->id, count, buf);
-
+ 
      do {
          interrupted = 0;
 @@ -998,6 +998,19 @@ nc_write_error(struct wclb_arg *arg, struct nc_server_error *err, const char *pr
          pref_len = strlen(prefix);
      }
-
+ 
 +    VRB("Error message content: %s", err->message);
 +    const char* substr = "<error>";
 +
@@ -104,7 +153,7 @@ index 252a8b4..d082b8e 100644
 +    WRN("Rpc-error not formated yet");
 +
      nc_write_error_elem(arg, "rpc-error", 9, prefix, pref_len, 1, 0);
-
+ 
      nc_write_error_elem(arg, "error-type", 10, prefix, pref_len, 1, 0);
 diff --git a/src/session_client.c b/src/session_client.c
 index 941f872..52c08d4 100644
@@ -170,7 +219,7 @@ index 941f872..52c08d4 100644
          if (connect(sock, res->ai_addr, res->ai_addrlen) < 0) {
              if (errno != EINPROGRESS) {
 @@ -1307,14 +1343,8 @@ _non_blocking_connect(int timeout, int *sock_pending, struct addrinfo *res, stru
-
+ 
      if (ret == 0) {
          /* there was a timeout */
 -        VRB("Timed out after %ds (%s).", timeout, strerror(errno));
@@ -184,7 +233,7 @@ index 941f872..52c08d4 100644
 +        VRB("Timed out after %d.", timeout);
 +        goto cleanup;
      }
-
+ 
      /* check the usability of the socket */
 @@ -1354,7 +1384,7 @@ cleanup:
     has to be invoked, until it returns a valid socket.
@@ -197,7 +246,7 @@ index 941f872..52c08d4 100644
      int sock = sock_pending ? *sock_pending : -1;
 @@ -1379,7 +1409,7 @@ nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepaliv
          }
-
+ 
          for (res = res_list; res != NULL; res = res->ai_next) {
 -            sock = _non_blocking_connect(timeout, sock_pending, res, ka);
 +            sock = _non_blocking_connect(timeout, sock_pending, res, ka, local_address, local_port);
@@ -211,7 +260,7 @@ index 941f872..52c08d4 100644
 -        sock = _non_blocking_connect(timeout, sock_pending, NULL, ka);
 +        sock = _non_blocking_connect(timeout, sock_pending, NULL, ka, local_address, local_port);
      }
-
+ 
      return sock;
 diff --git a/src/session_client_ssh.c b/src/session_client_ssh.c
 index 7097e8e..02dbd29 100644
@@ -219,7 +268,7 @@ index 7097e8e..02dbd29 100644
 +++ b/src/session_client_ssh.c
 @@ -1575,7 +1575,7 @@ _nc_connect_libssh(ssh_session ssh_session, struct ly_ctx *ctx, struct nc_keepal
          ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_HOST, host);
-
+ 
          /* create and connect socket */
 -        sock = nc_sock_connect(host, port, -1, ka, NULL, &ip_host);
 +        sock = nc_sock_connect(host, port, NULL, 0, -1, ka, NULL, &ip_host);
@@ -228,7 +277,7 @@ index 7097e8e..02dbd29 100644
              goto fail;
 @@ -1725,7 +1725,7 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
      ssh_options_set(session->ti.libssh.session, SSH_OPTIONS_TIMEOUT, &timeout);
-
+ 
      /* create and assign communication socket */
 -    sock = nc_sock_connect(host, port, -1, &client_opts.ka, NULL, &ip_host);
 +    sock = nc_sock_connect(host, port, NULL, 0, -1, &client_opts.ka, NULL, &ip_host);
@@ -241,7 +290,7 @@ index b548dcb..91baeb8 100644
 +++ b/src/session_client_tls.c
 @@ -622,7 +622,7 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
      }
-
+ 
      /* create and assign socket */
 -    sock = nc_sock_connect(host, port, -1, &client_opts.ka, NULL, &ip_host);
 +    sock = nc_sock_connect(host, port, NULL, 0, -1, &client_opts.ka, NULL, &ip_host);
@@ -257,9 +306,9 @@ index 4e1346e..d5ad175 100644
  #include "session.h"
  #include "messages_client.h"
 +#include "session_server.h"
-
+ 
  #ifdef NC_ENABLED_SSH
-
+ 
 @@ -261,6 +262,8 @@ struct nc_server_opts {
              NC_TRANSPORT_IMPL ti;
              const char *address;
@@ -285,7 +334,7 @@ index 4e1346e..d5ad175 100644
 +    atomic_uint_least16_t re_call_home_no_ssh_timer;
 +    atomic_uint_least8_t max_call_home_attempts;
 +    nc_server_ch_exceeded_clb max_callhome_clb;
-
+ 
      /* Atomic IDs */
      ATOMIC_UINT32_T new_session_id;
 @@ -553,13 +561,15 @@ NC_MSG_TYPE nc_handshake_io(struct nc_session *session);
@@ -302,23 +351,23 @@ index 4e1346e..d5ad175 100644
   */
 -int nc_sock_connect(const char *host, uint16_t port, int timeout, struct nc_keepalives *ka, int *sock_pending, char **ip_host);
 +int nc_sock_connect(const char *host, uint16_t port, const char *local_address, uint16_t local_port, int timeout, struct nc_keepalives *ka, int *sock_pending, char **ip_host);
-
+ 
  /**
   * @brief Accept a new socket connection.
 diff --git a/src/session_server.c b/src/session_server.c
-index 6025f39..8f017fe 100644
+index 6025f39..cf918f0 100644
 --- a/src/session_server.c
 +++ b/src/session_server.c
-@@ -31,20 +31,31 @@
+@@ -31,21 +31,35 @@
  #include <time.h>
  #include <signal.h>
  #include <pwd.h>
 +#include <stdatomic.h>
-
+ 
  #include "libnetconf.h"
  #include "session_server.h"
  #include "session_server_ch.h"
-
+ 
 +#define DEFAULT_RE_CALL_HOME_NO_SSH_TIMER 60
 +#define DEFAULT_MAX_CALL_HOME_ATTEMPTS 20
 +
@@ -337,24 +386,28 @@ index 6025f39..8f017fe 100644
 +    .re_call_home_no_ssh_timer = DEFAULT_RE_CALL_HOME_NO_SSH_TIMER,
 +    .max_call_home_attempts = DEFAULT_MAX_CALL_HOME_ATTEMPTS
  };
-
+ 
 +static ssh_logging_callback nc_np2_log_sh_clb = NULL;
  static nc_rpc_clb global_rpc_clb = NULL;
-
++// libnetconf2 message ID counter is used to distinguish between
++// different rpc calls at the RuMplane side
++static uint64_t libnetconf2_msg_id = START_LIBNETCONF2_MESSAGE_ID;
+ 
  struct nc_endpt *
-@@ -882,8 +893,10 @@ nc_ps_lock(struct nc_pollsession *ps, uint8_t *id, const char *func)
-
+ nc_server_endpt_lock_get(const char *name, NC_TRANSPORT_IMPL ti, uint16_t *idx)
+@@ -882,8 +896,10 @@ nc_ps_lock(struct nc_pollsession *ps, uint8_t *id, const char *func)
+ 
      /* add ourselves into the queue */
      nc_ps_queue_add_id(ps, id);
 +    /* Remove this print to avoid flood
      DBL("PS 0x%p TID %lu queue: added %u, head %u, lenght %u", ps, (long unsigned int)pthread_self(), *id,
              ps->queue[ps->queue_begin], ps->queue_len);
 +    */
-
+ 
      /* is it our turn? */
      while (ps->queue[ps->queue_begin] != *id) {
-@@ -943,9 +956,10 @@ nc_ps_unlock(struct nc_pollsession *ps, uint8_t id, const char *func)
-
+@@ -943,9 +959,10 @@ nc_ps_unlock(struct nc_pollsession *ps, uint8_t id, const char *func)
+ 
      /* remove ourselves from the queue */
      nc_ps_queue_remove_id(ps, id);
 +    /* Removing this print to avoid flood on the logs
@@ -364,8 +417,8 @@ index 6025f39..8f017fe 100644
 +    */
      /* broadcast to all other threads that the queue moved */
      pthread_cond_broadcast(&ps->cond);
-
-@@ -2390,6 +2404,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
+ 
+@@ -2390,6 +2407,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
          for (i = 0; i < client->ch_endpt_count; ++i) {
              lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
              lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
@@ -373,7 +426,7 @@ index 6025f39..8f017fe 100644
              if (client->ch_endpts[i].sock_pending != -1) {
                  close(client->ch_endpts[i].sock_pending);
              }
-@@ -2422,6 +2437,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
+@@ -2422,6 +2440,7 @@ _nc_server_ch_client_del_endpt(struct nc_ch_client *client, const char *endpt_na
              if (!strcmp(client->ch_endpts[i].name, endpt_name) && (!ti || (ti == client->ch_endpts[i].ti))) {
                  lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
                  lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
@@ -381,10 +434,10 @@ index 6025f39..8f017fe 100644
                  if (client->ch_endpts[i].sock_pending != -1) {
                      close(client->ch_endpts[i].sock_pending);
                  }
-@@ -2779,6 +2795,60 @@ nc_server_ch_client_endpt_set_address(const char *client_name, const char *endpt
+@@ -2779,6 +2798,60 @@ nc_server_ch_client_endpt_set_address(const char *client_name, const char *endpt
      return 0;
  }
-
+ 
 +API int
 +nc_server_ch_client_endpt_set_local_address(const char *client_name, const char *endpt_name, const char *address)
 +{
@@ -442,10 +495,10 @@ index 6025f39..8f017fe 100644
  API int
  nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_name, uint16_t port)
  {
-@@ -2810,6 +2880,34 @@ nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_na
+@@ -2810,6 +2883,34 @@ nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_na
      return 0;
  }
-
+ 
 +API int
 +nc_server_ch_client_endpt_set_local_port(const char *client_name, const char *endpt_name, uint16_t port)
 +{
@@ -477,10 +530,10 @@ index 6025f39..8f017fe 100644
  API int
  nc_server_ch_client_endpt_enable_keepalives(const char *client_name, const char *endpt_name, int enable)
  {
-@@ -3075,10 +3173,27 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
+@@ -3075,10 +3176,27 @@ nc_connect_ch_endpt(struct nc_ch_endpt *endpt, struct nc_session **session)
      struct timespec ts_cur;
      char *ip_host;
-
+ 
 -    sock = nc_sock_connect(endpt->address, endpt->port, 5, &endpt->ka, &endpt->sock_pending, &ip_host);
 +    sock = nc_sock_connect(endpt->address, endpt->port, endpt->local_address, endpt->local_port, 5, &endpt->ka, &endpt->sock_pending, &ip_host);
      if (sock < 0) {
@@ -505,11 +558,11 @@ index 6025f39..8f017fe 100644
 +    endpt->sock = sock;
      /* no need to store the socket as pending any longer */
      endpt->sock_pending = -1;
-
-@@ -3269,12 +3384,50 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
+ 
+@@ -3269,12 +3387,50 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct
      return ret;
  }
-
+ 
 +// Counter of number of ru_controller libnetconf will try the re-call-home
 +//  procedure
 +unsigned _Atomic g_ru_controller_counter = ATOMIC_VAR_INIT(0);
@@ -558,10 +611,10 @@ index 6025f39..8f017fe 100644
      uint16_t next_endpt_index;
      char *cur_endpt_name = NULL;
      struct nc_ch_endpt *cur_endpt;
-@@ -3283,40 +3436,78 @@ nc_ch_client_thread(void *arg)
+@@ -3283,40 +3439,81 @@ nc_ch_client_thread(void *arg)
      uint32_t client_id;
      time_t reconnect_in;
-
+ 
 -    /* LOCK */
 -    client = nc_server_ch_client_with_endpt_lock(data->client_name);
 -    if (!client) {
@@ -580,7 +633,7 @@ index 6025f39..8f017fe 100644
 +        }
      }
 -    client_id = client->id;
-
+ 
 -    cur_endpt = &client->ch_endpts[0];
 -    cur_endpt_name = strdup(cur_endpt->name);
 +    VRB("Sleeping 500ms waiting subscription to sysrepo is done");
@@ -588,7 +641,7 @@ index 6025f39..8f017fe 100644
 +
 +    uint16_t re_call_home_no_ssh_timer = nc_server_get_re_call_home_no_ssh_timer();
 +    uint8_t max_call_home_attempts = nc_server_get_max_call_home_attempts();
-
+ 
 -    VRB("Call Home client \"%s\" connecting...", data->client_name);
      while (1) {
 +        /* LOCK */
@@ -604,14 +657,17 @@ index 6025f39..8f017fe 100644
 +
 +        VRB("Call Home client \"%s\" connecting to %s...", data->client_name, cur_endpt->address);
          msgtype = nc_connect_ch_endpt(cur_endpt, &session);
-
+ 
          if (msgtype == NC_MSG_HELLO) {
 +            /* Connection was made, clear the attempt counter */
 +            total_attempts_per_client = 0;
              /* UNLOCK */
              nc_server_ch_client_unlock(client);
-
+ 
 -            VRB("Call Home client \"%s\" session %u established.", data->client_name, session->id);
++            /* Send <netconf session id and netconf server local IP> of established session to RuMplane */
++            nc_server_connect_to_rumplane(session->id, cur_endpt->local_address);
++
 +            VRB(
 +                "Call Home client \"%s\" session %u established."
 +                " Number of client still available for call-home attempt: %d",
@@ -629,7 +685,7 @@ index 6025f39..8f017fe 100644
 +            VRB(
 +                "Call Home client \"%s\" session terminated",
 +                data->client_name);
-
+ 
              /* LOCK */
              client = nc_server_ch_client_with_endpt_lock(data->client_name);
              if (!client) {
@@ -641,13 +697,13 @@ index 6025f39..8f017fe 100644
 +                atomic_fetch_sub(&g_ru_controller_counter, 1);
                  goto cleanup;
              }
-
+ 
 +            // This part is regarding connection type periodic which is not required
 +
              /* session changed status -> it was disconnected for whatever reason,
               * persistent connection immediately tries to reconnect, periodic connects at specific times */
              if (client->conn_type == NC_CH_PERIOD) {
-@@ -3330,13 +3521,15 @@ nc_ch_client_thread(void *arg)
+@@ -3330,13 +3527,15 @@ nc_ch_client_thread(void *arg)
                  /* LOCK */
                  client = nc_server_ch_client_with_endpt_lock(data->client_name);
                  if (!client) {
@@ -661,10 +717,10 @@ index 6025f39..8f017fe 100644
                  }
 -            }
 +            } // End of NC_CH_PERIOD
-
+ 
              /* set next endpoint to try */
              if (client->start_with == NC_CH_FIRST_LISTED) {
-@@ -3356,25 +3549,26 @@ nc_ch_client_thread(void *arg)
+@@ -3356,25 +3555,26 @@ nc_ch_client_thread(void *arg)
                  /* just get a random index */
                  next_endpt_index = rand() % client->ch_endpt_count;
              }
@@ -706,10 +762,10 @@ index 6025f39..8f017fe 100644
 +            //         to the next endpoint in the list (round robin).";
 +            //    }
 +            ++total_attempts_per_endpoint;
-
+ 
              /* try to find our endpoint again */
              for (next_endpt_index = 0; next_endpt_index < client->ch_endpt_count; ++next_endpt_index) {
-@@ -3386,8 +3580,8 @@ nc_ch_client_thread(void *arg)
+@@ -3386,8 +3586,8 @@ nc_ch_client_thread(void *arg)
              if (next_endpt_index >= client->ch_endpt_count) {
                  /* endpoint was removed, start with the first one */
                  next_endpt_index = 0;
@@ -720,21 +776,21 @@ index 6025f39..8f017fe 100644
                  /* we have tried to connect to this endpoint enough times */
                  if (next_endpt_index < client->ch_endpt_count - 1) {
                      /* just go to the next endpoint */
-@@ -3397,15 +3591,47 @@ nc_ch_client_thread(void *arg)
+@@ -3397,15 +3597,47 @@ nc_ch_client_thread(void *arg)
                      next_endpt_index = 0;
                  }
-
+ 
 -                cur_attempts = 0;
 +                total_attempts_per_endpoint = 0;
              } /* else we keep the current one */
 -        }
 +        } // end of if/else
-
+ 
          cur_endpt = &client->ch_endpts[next_endpt_index];
          free(cur_endpt_name);
          cur_endpt_name = strdup(cur_endpt->name);
 -    }
-
+ 
 +        // Unlock mutex while sleeping
 +        /* UNLOCK */
 +        nc_server_ch_client_unlock(client);
@@ -771,8 +827,8 @@ index 6025f39..8f017fe 100644
  cleanup:
      VRB("Call Home client \"%s\" thread exit.", data->client_name);
      free(cur_endpt_name);
-@@ -3506,3 +3732,104 @@ nc_session_is_callhome(const struct nc_session *session)
-
+@@ -3506,3 +3738,227 @@ nc_session_is_callhome(const struct nc_session *session)
+ 
      return 0;
  }
 +
@@ -871,19 +927,188 @@ index 6025f39..8f017fe 100644
 +    return 0;
 +}
 +
++API uint64_t
++nc_server_get_next_libnetconf2_rumplane_msg_id()
++{
++    if(libnetconf2_msg_id > MAX_LIBNETCONF2_MESSAGE_ID) {
++        libnetconf2_msg_id = START_LIBNETCONF2_MESSAGE_ID;
++    }
++    return libnetconf2_msg_id++;
++}
++
++API int nc_server_connect_to_rumplane(uint32_t nc_session_id,
++                                        const char *ncServerLocalAddr)
++{
++    int sock = -1, ret = -1;
++    uint8_t is_NcServerLocalAddrIpv4 = -1;
++    struct sockaddr_in server_addr;
++    fd_set writefds;
++    struct timeval tv;
++    ssize_t bytes_sent;
++
++    if (!ncServerLocalAddr ||
++            strlen(ncServerLocalAddr) >= MAX_NC_SERVER_LOCAL_ADDR_LEN) {
++        ERRARG("ncServerLocalAddr is NULL or invalid");
++        return -1;
++    }
++
++    is_NcServerLocalAddrIpv4 = (!strchr(ncServerLocalAddr, ':')) ? 1 : 0;
++
++    sock = socket(AF_INET, SOCK_STREAM, 0);
++    if (sock == -1) {
++        ERR("Failed to create socket (%s).", strerror(errno));
++        goto cleanup;
++    }
++    int flags = fcntl(sock, F_GETFL, 0);
++    if (flags == -1 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1) {
++        ERR("Failed to set non-blocking mode (%s).", strerror(errno));
++        goto cleanup;
++    }
++
++    memset(&server_addr, 0, sizeof(server_addr));
++    server_addr.sin_family = AF_INET;
++    server_addr.sin_port = htons(RU_MPLANE_PORT);
++
++    if (inet_pton(AF_INET, RU_MPLANE_ADDR, &server_addr.sin_addr) <= 0) {
++        ERR("Invalid IP address (%s).", RU_MPLANE_ADDR);
++        goto cleanup;
++    }
++
++    VRB("Trying to connect to RuMplane..");
++    if (connect(sock,
++                (struct sockaddr *)&server_addr,
++                sizeof(server_addr)) < 0) {
++        if(errno != EINPROGRESS) {
++            ERR("Failed to connect to ruMplane app at %s:%u (%s).",
++                RU_MPLANE_ADDR, RU_MPLANE_PORT, strerror(errno));
++            goto cleanup;
++        }
++
++        FD_ZERO(&writefds);
++        // to check when the socket becomes writable, we're using select()
++        FD_SET(sock, &writefds);
++        tv.tv_sec = 1;
++        tv.tv_usec = 0;
++
++        ret = select(sock + 1, NULL, &writefds, NULL, &tv);
++        if (ret <= 0) {
++            ERR("Connection to RuMplane app at %s:%u timed out or failed.",
++                RU_MPLANE_ADDR, RU_MPLANE_PORT);
++            goto cleanup;
++        }
++
++        int so_error;
++        socklen_t len = sizeof(so_error);
++        if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0 || so_error != 0) {
++            ERR("Connection error to RuMplane app at %s:%u (%s).",
++                RU_MPLANE_ADDR, RU_MPLANE_PORT, strerror(so_error));
++            goto cleanup;
++        }
++    }
++
++    VRB("Connected to RuMplane app at %s:%u.", RU_MPLANE_ADDR, RU_MPLANE_PORT);
++
++    // Prepare packet to be sent to ruMplane app
++    InterfacePacket_t pkt;
++    Libnetconf2Message_t msg;
++    memset(&pkt, 0, sizeof(pkt));
++    memset(&msg, 0, sizeof(msg));
++
++    pkt.header.msgType = NOTIFICATION;
++    pkt.header.msgSubType = LIBNETCONF2;
++    pkt.header.oduOrOruSessionId = nc_session_id;
++    pkt.header.messageId = nc_server_get_next_libnetconf2_rumplane_msg_id();
++    pkt.header.payloadSize =
++        sizeof(msg.msgType) + sizeof(msg.lenOfNcServerLocalAddr) +
++        sizeof(msg.isNcServerLocalAddrIpv4) + strlen(ncServerLocalAddr);
++
++    msg.msgType = NC_SERVER_INFO;       // type of message
++    msg.lenOfNcServerLocalAddr = strlen(ncServerLocalAddr);
++    msg.isNcServerLocalAddrIpv4 = is_NcServerLocalAddrIpv4;
++    memcpy(msg.ncServerLocalAddr,
++            ncServerLocalAddr,
++            MAX_NC_SERVER_LOCAL_ADDR_LEN);
++    memcpy(pkt.payload, &msg, pkt.header.payloadSize);
++
++    bytes_sent = send(
++        sock, &pkt, sizeof(InterfaceHeader_t) + pkt.header.payloadSize, 0);
++    if (bytes_sent == -1) {
++        ERR("Failed to send info message (%s).", strerror(errno));
++        goto cleanup;
++    }
++    if ((size_t)bytes_sent < sizeof(InterfaceHeader_t) + pkt.header.payloadSize) {
++        ERR("Only sent %zd of %zu bytes for data message.", 
++            bytes_sent, sizeof(InterfaceHeader_t) + pkt.header.payloadSize);
++        goto cleanup;
++    }
++
++    VRB("netconf server local IP: \"%s\", for session: %d sent to RuMplane",
++            ncServerLocalAddr, nc_session_id);
++    ret = 0;
++
++cleanup:
++    if (sock != -1) close(sock);
++    return ret;
++}
 +
 +API void nc_server_np2_log_sh_clb(ssh_logging_callback clb)
 +{
 +    nc_np2_log_sh_clb = clb;
 +}
 diff --git a/src/session_server.h b/src/session_server.h
-index df7b075..822a544 100644
+index df7b075..82cd602 100644
 --- a/src/session_server.h
 +++ b/src/session_server.h
-@@ -904,6 +904,69 @@ int nc_session_get_notif_status(const struct nc_session *session);
+@@ -21,6 +21,9 @@ extern "C" {
+ 
+ #include <stdint.h>
+ #include <libyang/libyang.h>
++#include <sys/socket.h>
++#include <netinet/in.h>
++#include <arpa/inet.h>
+ 
+ #ifdef NC_ENABLED_TLS
+ #   include <openssl/x509.h>
+@@ -35,6 +38,15 @@ extern "C" {
+ #include "session.h"
+ #include "netconf.h"
+ 
++#include "MPlaneInterface.h"
++
++#define RU_MPLANE_ADDR "127.0.0.1"
++#define RU_MPLANE_PORT 4545
++// Libnetconf2 to use 16 numbers for rpc-id sent to RuMplane from the
++// 4th quarter, out of the 64 bits range
++#define START_LIBNETCONF2_MESSAGE_ID 0xC000000000000000
++#define MAX_LIBNETCONF2_MESSAGE_ID 0xC00000000000000F
++
+ /**
+  * @defgroup server_session Server Session
+  * @ingroup server
+@@ -904,6 +916,89 @@ int nc_session_get_notif_status(const struct nc_session *session);
   */
  int nc_session_is_callhome(const struct nc_session *session);
-
+ 
++/**
++ * @brief return the next libnetconf2 msg id sent to rumplane
++ *
++ */
++uint64_t nc_server_get_next_libnetconf2_rumplane_msg_id();
++
++/**
++ * \brief Initiates a TCP connection to the ruMplane app and sends the desired data.
++ *
++ * This function creates a socket, connects to the specified IP and port,
++ * sends the provided nc-server local address, and then closes the socket.
++ *
++ * \param nc_session_id the netconf session ID for the established nc session
++ * \param ncServerLocalAddr established nc server local address
++ * \return 0 on success, -1 on failure.
++ */
++int nc_server_connect_to_rumplane(uint32_t nc_session_id,
++                                const char *ncServerLocalAddr);
++
++
 +/**
 + * @brief Updates the re_callhome_no_ssh_timer to the
 + * global session datastructure
@@ -948,7 +1173,7 @@ index df7b075..822a544 100644
 +nc_server_ch_exceeded_clb nc_server_get_call_home_exeeded_cb();
 +
  /**@} Server Session */
-
+ 
  #ifdef __cplusplus
 diff --git a/src/session_server_ch.h b/src/session_server_ch.h
 index c40ccc1..23360d2 100644
@@ -957,7 +1182,7 @@ index c40ccc1..23360d2 100644
 @@ -114,6 +114,41 @@ int nc_server_ch_client_endpt_set_address(const char *client_name, const char *e
   */
  int nc_server_ch_client_endpt_set_port(const char *client_name, const char *endpt_name, uint16_t port);
-
+ 
 +/**
 + * @brief Change Call Home client endpoint local binding address.
 + *
@@ -996,6 +1221,6 @@ index c40ccc1..23360d2 100644
  /**
   * @brief Change Call Home client endpoint keepalives state. Affects only new connections.
   *
---
-2.43.0
+-- 
+2.34.1
 
