@@ -1,10 +1,9 @@
-This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
-Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
-SPDX-License-Identifier: BSD-3-Clause-Clear
-From 85d706c09738feeb4612d1004a8f88cfe118fc08 Mon Sep 17 00:00:00 2001
-From: Romain Chaumontet <rchaumon@qti.qualcomm.com>
-Date: Mon, 20 Oct 2025 06:42:27 +0200
-Subject: [PATCH] Mplane Changes
+From 08fde92f919fb08a64388648ae6aa1ee5bc689c2 Mon Sep 17 00:00:00 2001
+From: Rishabh Kothari <rishkoth@qti.qualcomm.com>
+Date: Fri, 2 Jan 2026 11:22:11 +0100
+Subject: [PATCH] mplane-changes
+
+FR108021 - QNCM Discovery API Redesign
 
 Improve log usage for libraries
 
@@ -47,26 +46,26 @@ Signed-off-by: Romain Chaumontet <rchaumon@qti.qualcomm.com>
 
 Signed-off-by: Rishi Singh <quic_rishikan@quicinc.com>
 ---
- CMakeLists.txt                 |  41 +++++++
- CMakeModules/FindSysrepo.cmake |  12 +-
- scripts/merge_hostkey.sh       |   2 +-
- scripts/setup.sh               |  11 --
- src/common.c                   |   9 ++
- src/log.c                      | 145 +++++++++++++++++++++--
- src/log.h                      |   6 +
- src/main.c                     | 203 +++++++++++++++++++++++++++++++--
- src/netconf.c                  | 121 ++++++++++++++++----
- src/netconf_server.c           | 191 +++++++++++++++++++++++++++++++
- src/netconf_server.h           |  11 ++
- src/netconf_server_ssh.c       |   4 +-
- 12 files changed, 700 insertions(+), 56 deletions(-)
+ CMakeLists.txt                 |   41 ++
+ CMakeModules/FindSysrepo.cmake |   12 +-
+ scripts/merge_hostkey.sh       |    2 +-
+ scripts/setup.sh               |   11 -
+ src/common.c                   |    9 +
+ src/log.c                      |  164 ++++-
+ src/log.h                      |   16 +-
+ src/main.c                     |  240 ++++++-
+ src/netconf.c                  |  121 +++-
+ src/netconf_server.c           | 1144 +++++++++++++++++++++++++++++++-
+ src/netconf_server.h           |  133 ++++
+ src/netconf_server_ssh.c       |    4 +-
+ 12 files changed, 1812 insertions(+), 85 deletions(-)
 
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index be6700b..ef7c92d 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -275,3 +275,44 @@ add_custom_target(cleancache
-
+ 
  # uninstall
  add_custom_target(uninstall "${CMAKE_COMMAND}" -P "${CMAKE_MODULE_PATH}/uninstall.cmake")
 +
@@ -117,7 +116,7 @@ index 8dda6df..65f77e1 100644
 @@ -49,11 +49,19 @@ else()
          ${CMAKE_LIBRARY_PATH} ${CMAKE_INSTALL_PREFIX}/lib
      )
-
+ 
 +    find_library(SYSREPO_CPP_LIBRARY
 +        NAMES sysrepo-cpp libsysrepo-cpp
 +        PATHS /usr/lib /usr/lib64 /usr/local/lib /usr/local/lib64 /opt/local/lib /sw/lib
@@ -130,7 +129,7 @@ index 8dda6df..65f77e1 100644
 -    mark_as_advanced(SYSREPO_INCLUDE_DIRS SYSREPO_LIBRARIES)
 +    set(SYSREPO_CPP_LIBRARIES ${SYSREPO_CPP_LIBRARY})
 +    mark_as_advanced(SYSREPO_INCLUDE_DIRS SYSREPO_LIBRARIES SYSREPO_CPP_LIBRARIES)
-
+ 
      # handle the QUIETLY and REQUIRED arguments and set SYSREPO_FOUND to TRUE
      # if all listed variables are TRUE
 -    find_package_handle_standard_args(Sysrepo DEFAULT_MSG SYSREPO_LIBRARY SYSREPO_INCLUDE_DIR)
@@ -154,7 +153,7 @@ index 317e5ef..b5d7711 100755
 --- a/scripts/setup.sh
 +++ b/scripts/setup.sh
 @@ -23,20 +23,9 @@ GROUP=${NP2_MODULE_GROUP}
-
+ 
  # array of modules to install
  MODULES=(
 -"ietf-netconf-acm@2018-02-14.yang"
@@ -172,7 +171,7 @@ index 317e5ef..b5d7711 100755
 -"ietf-tls-server@2019-07-02.yang -e local-client-auth-supported"
 -"ietf-netconf-server@2019-07-02.yang -e ssh-listen -e tls-listen -e ssh-call-home -e tls-call-home"
  )
-
+ 
  # functions
 diff --git a/src/common.c b/src/common.c
 index 02ef4ba..27e08e2 100644
@@ -181,17 +180,17 @@ index 02ef4ba..27e08e2 100644
 @@ -38,6 +38,9 @@
  #include "netconf_acm.h"
  #include "netconf_monitoring.h"
-
+ 
 +#ifdef SUCCESVOTER_ENABLED
 +#include "libsetsuccessvoter.h"
 +#endif
  struct np2srv np2srv = {.unix_mode = -1, .unix_uid = -1, .unix_gid = -1};
-
+ 
  int
 @@ -179,6 +182,12 @@ np2srv_new_session_cb(const char *UNUSED(client_name), struct nc_session *new_se
          free(event_data);
      }
-
+ 
 +#ifdef SUCCESVOTER_ENABLED
 +    VRB("Sending success vote to ab-updater");
 +    const char *modulename = "netopeer2";
@@ -199,10 +198,10 @@ index 02ef4ba..27e08e2 100644
 +#endif
 +
      return;
-
+ 
  error:
 diff --git a/src/log.c b/src/log.c
-index 4260108..85612a8 100644
+index 4260108..34c592d 100644
 --- a/src/log.c
 +++ b/src/log.c
 @@ -17,6 +17,7 @@
@@ -223,7 +222,7 @@ index 4260108..85612a8 100644
 +#include <pthread.h>
  #include "common.h"
  #include "log.h"
-
+ 
 +#ifdef DIAG_LOGGING
 +#include <diag/msg.h>   // for MSG_SPRINTF_1
 +#define MSG_SSID_CSM_ORAN_MPLANE_RU_NP   11064
@@ -239,7 +238,7 @@ index 4260108..85612a8 100644
 +    char* message;
      va_list ap;
 +    va_list ap_copy_size;
-
+ 
      va_start(ap, fmt);
 -    vsyslog(priority, fmt, ap);
 +    va_copy(ap_copy_size, ap);
@@ -261,7 +260,7 @@ index 4260108..85612a8 100644
 +    // Copy message arguments into message
 +    vsnprintf(message, needed + 1, fmt, ap);
      va_end(ap);
-
+ 
 +    // Print into syslog
 +    syslog(priority, "%s", message);
 +
@@ -290,7 +289,7 @@ index 4260108..85612a8 100644
 +            free(message);
              return;
          }
-
+ 
          switch (priority) {
          case LOG_ERR:
 -            sprintf(format, "[ERR]: %s: %s\n", src, fmt);
@@ -313,7 +312,7 @@ index 4260108..85612a8 100644
 +            snprintf(format, bufferSize, "[%s] [tid: %lu] [UNK]: %s: %s\n", timestamp, (unsigned long)thread_id, src, message);
              break;
          }
-
+ 
 -        va_start(ap, fmt);
 -        vfprintf(stderr, format, ap);
 -        va_end(ap);
@@ -335,17 +334,17 @@ index 4260108..85612a8 100644
 +#endif
 +
 +        fprintf(stderr, "%s", format);
-
+ 
          free(format);
      }
 +    free(message);
  }
-
+ 
  /**
-@@ -236,6 +299,64 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
+@@ -236,13 +299,71 @@ np2log_cb_sr(sr_log_level_t level, const char *msg)
      free(buf);
  }
-
+ 
 +/**
 + * @brief LibSSH logging callback function.
 + *
@@ -407,14 +406,83 @@ index 4260108..85612a8 100644
  /**
   * @brief Internal printing function, follows the levels from libnetconf2
   * @param[in] level Verbose level
+  * @param[in] format Formatting string
+  */
+ void
+-np2log_printf(NC_VERB_LEVEL level, const char *format, ...)
++np2log_printf(const char* func, NC_VERB_LEVEL level, const char *format, ...)
+ {
+     va_list ap, ap2;
+     ssize_t msg_len = NP2SRV_MSG_LEN_START, req_len;
+@@ -267,7 +388,7 @@ np2log_printf(NC_VERB_LEVEL level, const char *format, ...)
+     if (req_len == -1) {
+         goto cleanup;
+     } else if (req_len >= NP2SRV_MSG_LEN_START) {
+-        /* the intial size was not enough */
++        /* the initial size was not enough */
+         msg_len = req_len + 1;
+         mem = realloc(msg, msg_len);
+         if (!mem) {
+@@ -283,9 +404,18 @@ np2log_printf(NC_VERB_LEVEL level, const char *format, ...)
+         }
+     }
+ 
++    /* Integrate function name */
++    size_t func_len = strlen(func);
++    size_t total_len = func_len + 2 + req_len + 1; // "func: msg\0"
++    char *full_msg = malloc(total_len);
++    if (!full_msg) {
++        goto cleanup;
++    }
++    snprintf(full_msg, total_len, "%s: %s", func, msg);
++
+     switch (level) {
+     case NC_VERB_ERROR:
+-        priority = LOG_ERR;;
++        priority = LOG_ERR;
+         break;
+     case NC_VERB_WARNING:
+         priority = LOG_WARNING;
+@@ -299,7 +429,9 @@ np2log_printf(NC_VERB_LEVEL level, const char *format, ...)
+         break;
+     }
+     /* no need to encode in this case */
+-    np2log(priority, "NP", msg);
++    np2log(priority, "NP", full_msg);
++
++    free(full_msg);
+ 
+ cleanup:
+     free(msg);
 diff --git a/src/log.h b/src/log.h
-index 66262e4..b98e337 100644
+index 66262e4..ce524fe 100644
 --- a/src/log.h
 +++ b/src/log.h
+@@ -43,15 +43,15 @@ extern uint8_t np2_stderr_log;
+  * @param[in] level Verbose level
+  * @param[in] format Formatting string
+  */
+-void np2log_printf(NC_VERB_LEVEL level, const char *format, ...);
++void np2log_printf(const char* func, NC_VERB_LEVEL level, const char *format, ...);
+ 
+ /*
+  * Verbose printing macros
+  */
+-#define ERR(format,args...) np2log_printf(NC_VERB_ERROR,format,##args)
+-#define WRN(format,args...) np2log_printf(NC_VERB_WARNING,format,##args)
+-#define VRB(format,args...) np2log_printf(NC_VERB_VERBOSE,format,##args)
+-#define DBG(format,args...) np2log_printf(NC_VERB_DEBUG,format,##args)
++#define ERR(format,args...) np2log_printf(__func__, NC_VERB_ERROR,format,##args)
++#define WRN(format,args...) np2log_printf(__func__, NC_VERB_WARNING,format,##args)
++#define VRB(format,args...) np2log_printf(__func__, NC_VERB_VERBOSE,format,##args)
++#define DBG(format,args...) np2log_printf(__func__, NC_VERB_DEBUG,format,##args)
+ 
+ #define EMEM ERR("Memory allocation failed (%s:%d)", __FILE__, __LINE__)
+ #define EINT ERR("Internal error (%s:%d)", __FILE__, __LINE__)
 @@ -71,4 +71,10 @@ void np2log_cb_ly(LY_LOG_LEVEL level, const char *msg, const char *path);
   */
  void np2log_cb_sr(sr_log_level_t level, const char *msg);
-
+ 
 +/**
 + * @brief printer callback for libshh
 + */
@@ -423,7 +491,7 @@ index 66262e4..b98e337 100644
 +
  #endif /* NP2SRV_LOG_H_ */
 diff --git a/src/main.c b/src/main.c
-index d1abcdb..8d7a256 100644
+index d1abcdb..e9a115c 100644
 --- a/src/main.c
 +++ b/src/main.c
 @@ -25,6 +25,7 @@
@@ -431,7 +499,7 @@ index d1abcdb..8d7a256 100644
  #include <pwd.h>
  #include <grp.h>
 +#include <glib.h>
-
+ 
  #include <libyang/libyang.h>
  #include <nc_server.h>
 @@ -34,11 +35,13 @@
@@ -451,7 +519,7 @@ index d1abcdb..8d7a256 100644
 @@ -47,6 +50,11 @@
  #include "netconf_monitoring.h"
  #include "netconf_nmda.h"
-
+ 
 +#ifdef DIAG_LOGGING
 +#include <diag/msg.h>	    // For diag data-types
 +#include <diag/diag_lsm.h>  // For Diag_LSM_Init()
@@ -459,11 +527,11 @@ index d1abcdb..8d7a256 100644
 +
  /** @brief flag for main loop */
  ATOMIC_T loop_continue = 1;
-
+ 
 @@ -161,6 +169,42 @@ np2srv_ntf_get_data(sr_conn_ctx_t *sr_conn)
          }
      }
-
+ 
 +    // Add O-RAN V15 streams
 +    const char* o_ran_streams[] = {
 +                                    "fault-management",
@@ -502,11 +570,11 @@ index d1abcdb..8d7a256 100644
 +
      lyd_free_withsiblings(sr_data);
      return root;
-
+ 
 @@ -744,6 +788,13 @@ server_rpc_subscribe(void)
      const char *xpath;
      int rc;
-
+ 
 +    /* Set the Max Call home callback */
 +    nc_server_update_max_call_home_clb(call_home_attempts_exceeded_clb);
 +
@@ -534,7 +602,58 @@ index d1abcdb..8d7a256 100644
      /* keep close-session empty so that internal lnc2 callback is used */
      SR_RPC_SUBSCR("/ietf-netconf:kill-session", np2srv_rpc_kill_cb);
      SR_RPC_SUBSCR("/ietf-netconf:commit", np2srv_rpc_commit_cb);
-@@ -934,8 +985,30 @@ server_data_subscribe(void)
+@@ -873,31 +924,32 @@ server_data_subscribe(void)
+ #if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
+     /* subscribe for generic Call Home configuration changes */
+     xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client";
+-    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_client_cb);
++    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_mplane_ch_netconf_client_cb);
+ 
+-    xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/connection-type";
+-    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_connection_type_cb);
++//    xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/connection-type";
++//    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_connection_type_cb);
+ 
+-    xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/reconnect-strategy";
+-    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_reconnect_strategy_cb);
++    // we don't fill data on reconnect-strategy
++//    xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/reconnect-strategy";
++//    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_reconnect_strategy_cb);
+ #endif
+ 
+-#ifdef NC_ENABLED_SSH
+-    /* subscribe for server SSH Call Home configuration changes */
+-    xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ssh";
+-    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_client_endpt_ssh_cb);
++// #ifdef NC_ENABLED_SSH
++//     /* subscribe for server SSH Call Home configuration changes */
++//     xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ssh";
++//     SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_client_endpt_ssh_cb);
+ 
+-    xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ssh/tcp-client-parameters";
+-    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_client_endpt_tcp_params_cb);
++//     xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ssh/tcp-client-parameters";
++//     SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_client_endpt_tcp_params_cb);
+ 
+-    xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ssh/ssh-server-parameters/"
+-            "server-identity/host-key/public-key/keystore-reference";
+-    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_endpt_ssh_hostkey_cb);
++//     xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ssh/ssh-server-parameters/"
++//             "server-identity/host-key/public-key/keystore-reference";
++//     SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_endpt_ssh_hostkey_cb);
+ 
+-    xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ssh/ssh-server-parameters/"
+-            "client-authentication/supported-authentication-methods";
+-    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_endpt_ssh_auth_methods_cb);
+-#endif
++//     xpath = "/ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ssh/ssh-server-parameters/"
++//             "client-authentication/supported-authentication-methods";
++//     SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_ch_endpt_ssh_auth_methods_cb);
++// #endif
+ 
+ #ifdef NC_ENABLED_TLS
+     /* subscribe for TLS Call Home configuration changes */
+@@ -934,8 +986,30 @@ server_data_subscribe(void)
      mod_name = "ietf-truststore";
      xpath = "/ietf-truststore:truststore/certificates";
      SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_dummy_cb);
@@ -550,7 +669,7 @@ index d1abcdb..8d7a256 100644
 +    xpath = "/o-ran-operations:operational-info/max-call-home-attempts";
 +    SR_CONFIG_SUBSCR(mod_name, xpath, np2srv_max_call_home_attempts);
  #endif
-
+ 
 +    /*
 +     * ietf-interfaces: to get m-plane-marking
 +     */
@@ -565,20 +684,20 @@ index d1abcdb..8d7a256 100644
      /*
       * ietf-netconf-acm
       */
-@@ -978,6 +1051,9 @@ worker_thread(void *arg)
-
+@@ -978,6 +1052,9 @@ worker_thread(void *arg)
+ 
  #ifdef NC_ENABLED_SSH
      nc_libssh_thread_verbosity(np2_libssh_verbose_level);
 +    if(ssh_set_log_callback(np2log_cb_sh)) {
 +        ERR("Failed to set LibSSH log callback function.");
 +    }
  #endif
-
+ 
      while (ATOMIC_LOAD_RELAXED(loop_continue)) {
-@@ -1098,6 +1174,39 @@ main(int argc, char *argv[])
+@@ -1098,6 +1175,39 @@ main(int argc, char *argv[])
      openlog("netopeer2-server", LOG_PID, LOG_DAEMON);
      np2_stderr_log = 1;
-
+ 
 +#ifdef SUCCESVOTER_ENABLED
 +    #define MAX_LINE_LENGTH_MACHINE 100
 +    char machine_name_line[MAX_LINE_LENGTH_MACHINE];
@@ -615,8 +734,8 @@ index d1abcdb..8d7a256 100644
      /* process command line options */
      while ((c = getopt(argc, argv, "dhVp:U::m:u:g:t:v:c:")) != -1) {
          switch (c) {
-@@ -1116,25 +1225,42 @@ main(int argc, char *argv[])
-
+@@ -1116,25 +1226,42 @@ main(int argc, char *argv[])
+ 
              c = atoi(optarg);
              /* normalize verbose level */
 -            np2_verbose_level = (c > NC_VERB_ERROR) ? ((c > NC_VERB_VERBOSE) ? NC_VERB_VERBOSE : c) : NC_VERB_ERROR;
@@ -637,7 +756,7 @@ index d1abcdb..8d7a256 100644
                  np2_sr_verbose_level = SR_LL_INF;
 -                np2_libssh_verbose_level = 1;
 +                np2_libssh_verbose_level = SSH_LOG_PROTOCOL;
-+                break;
+                 break;
 +            // Adding DEBUG and DEBUG_LOWLVL level
 +            case NC_VERB_DEBUG:
 +                np2_sr_verbose_level = SR_LL_DBG;
@@ -646,11 +765,11 @@ index d1abcdb..8d7a256 100644
 +            case NC_VERB_DEBUG_LOWLVL:
 +                np2_sr_verbose_level = SR_LL_DBG;
 +                np2_libssh_verbose_level = SSH_LOG_FUNCTIONS;
-                 break;
++                break;
 +            default:
 +                ERR("Unknown log level %d", np2_verbose_level);
              }
-
+ 
              nc_verbosity(np2_verbose_level);
  #ifdef NC_ENABLED_SSH
              nc_libssh_thread_verbosity(np2_libssh_verbose_level);
@@ -662,10 +781,10 @@ index d1abcdb..8d7a256 100644
  #endif
              break;
          case 'V':
-@@ -1248,6 +1374,58 @@ main(int argc, char *argv[])
+@@ -1248,6 +1375,58 @@ main(int argc, char *argv[])
          }
      }
-
+ 
 +    {
 +        #define DEFAULT_SR_TIMEOUT 120
 +        #define MAX_LINE_LENGTH 100
@@ -721,10 +840,10 @@ index d1abcdb..8d7a256 100644
      /* daemonize */
      if (daemonize == 1) {
          if (daemon(0, 0) != 0) {
-@@ -1307,6 +1485,12 @@ main(int argc, char *argv[])
+@@ -1307,6 +1486,12 @@ main(int argc, char *argv[])
      ly_set_log_clb(np2log_cb_ly, 1); /* libyang */
      sr_log_set_cb(np2log_cb_sr); /* sysrepo, log level is checked by callback */
-
+ 
 +
 +#ifdef DIAG_LOGGING
 +    /* Initialize diag logging */
@@ -734,10 +853,10 @@ index d1abcdb..8d7a256 100644
      /* initiate NETCONF server */
      if (server_init()) {
          ret = EXIT_FAILURE;
-@@ -1379,5 +1563,10 @@ cleanup:
+@@ -1379,5 +1564,10 @@ cleanup:
      /* removes the context and clears all the sessions */
      sr_disconnect(np2srv.sr_conn);
-
+ 
 +#ifdef DIAG_LOGGING
 +    /* Deinit diag-logging */
 +    Diag_LSM_DeInit();
@@ -750,7 +869,7 @@ index 0bbe112..1ec5d10 100644
 --- a/src/netconf.c
 +++ b/src/netconf.c
 @@ -26,7 +26,6 @@
-
+ 
  #include <sysrepo.h>
  #include <libyang/libyang.h>
 -
@@ -760,7 +879,7 @@ index 0bbe112..1ec5d10 100644
 @@ -837,11 +836,46 @@ cleanup:
      return rc;
  }
-
+ 
 +static int
 +np2srv_rpc_subscribe_append_str(const char *str, char **ret)
 +{
@@ -811,7 +930,7 @@ index 0bbe112..1ec5d10 100644
      uint32_t idx;
 +    char* colon_pos = NULL;
 +    char* prefix = NULL;
-
+ 
      /* find this NETCONF session */
      for (i = 0; (ncs = nc_ps_get_session(np2srv.nc_ps, i)); ++i) {
 @@ -867,8 +903,34 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
@@ -844,7 +963,7 @@ index 0bbe112..1ec5d10 100644
 +        }
 +    }
 +
-
+ 
 -    /* filter */
 +    /* filter, join all into one xpath */
      nodeset = lyd_find_path(input, "filter");
@@ -853,7 +972,7 @@ index 0bbe112..1ec5d10 100644
 @@ -876,28 +938,38 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
              goto cleanup;
          }
-
+ 
 -        /* join all filters into one xpath */
 +        /* all selection filters first */
          for (i = 0; i < filter_count; ++i) {
@@ -899,10 +1018,10 @@ index 0bbe112..1ec5d10 100644
 +
 +    VRB("Filters %s", xp);
      ly_set_free(nodeset);
-
+ 
      /* start time */
 @@ -919,21 +991,21 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
-
+ 
      /* sysrepo API */
      if (!strcmp(stream, "NETCONF")) {
 -        /* subscribe to all modules with notifications */
@@ -944,7 +1063,7 @@ index 0bbe112..1ec5d10 100644
              }
 @@ -956,13 +1035,13 @@ np2srv_rpc_subscribe_cb(sr_session_ctx_t *session, const char *UNUSED(op_path),
      }
-
+ 
      /* success */
 -
  cleanup:
@@ -958,22 +1077,995 @@ index 0bbe112..1ec5d10 100644
          nc_session_set_notif_status(ncs, 0);
      }
 diff --git a/src/netconf_server.c b/src/netconf_server.c
-index 4645f84..902b15c 100644
+index 4645f84..0eebda2 100644
 --- a/src/netconf_server.c
 +++ b/src/netconf_server.c
-@@ -339,6 +339,173 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
+@@ -16,15 +16,25 @@
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <string.h>
++#include <stdio.h>
+ #include <assert.h>
++#include <netinet/in.h> // To get ipv6 address length
+ 
+ #include <nc_server.h>
+-#include <libyang/libyang.h>
+ #include <sysrepo.h>
+ 
+ #include "common.h"
+ #include "log.h"
+ 
++// Define maximum len of the interfaces name
++#define MAX_NAME_LEN 255 // Used for
++// Assuming they won't be more than 50 netconf client inside sysrepo data tree
++#define MAX_CLIENT_COUNT 50
++// Assuming they won't be more than 50 intefaces with dscp value
++#define MAX_INTERFACES_DSCP 50
++// Assuming libyang xpath won't be more than 1024 char
++#define MAX_XPATH_LEN 1024
++
+ int
+ np2srv_sr_get_privkey(const struct lyd_node *asym_key, char **privkey_data, NC_SSH_KEY_TYPE *privkey_type)
+ {
+@@ -294,6 +304,948 @@ np2srv_ch_periodic_connection_params(const char *client_name, sr_session_ctx_t *
      return SR_ERR_OK;
  }
-
+ 
++/**
++ * @brief Retrieve the first leaf or leaf-list node from a ly_set.
++ *
++ * This function extracts the first node from the provided ly_set and, if it is
++ * of type LYS_LEAF or LYS_LEAFLIST, assigns it to the output parameter as a
++ * struct lyd_node_leaf_list pointer.
++ *
++ * @param[in]  set        Pointer to the ly_set to search (must not be NULL).
++ * @param[out] leaf_list  Address of a pointer to receive the first leaf or
++ *                        leaf-list node (set to NULL on error).
++ *
++ * @return 0 on success, -1 on error (invalid arguments or node type mismatch).
++ */
++int
++np2srv_mplane_get_first_node_list_from_node(
++                                        const struct ly_set* set,
++                                        struct lyd_node_leaf_list** leaf_list)
++{
++    if (!set || set->number == 0)
++    {
++        ERR("Set %p provided is NULL or doesn't contain any leaf", set);
++        return -1;
++    }
++
++    if (!leaf_list)
++    {
++        ERR("leaf_list provided is NULL");
++        return -1;
++    }
++
++    // Get the node of the first item
++    struct lyd_node* extract_node = set->set.d[0];
++    if (!extract_node || !(extract_node->schema) ||
++            (extract_node->schema->nodetype != LYS_LEAF &&
++            extract_node->schema->nodetype != LYS_LEAFLIST))
++    {
++        ERR("Node is neither LYS_LEAF nor LYS_LEAFLIST");
++        return -1;
++    }
++
++    *leaf_list = (struct lyd_node_leaf_list *)(extract_node);
++    return 0;
++}
++
++/**
++ * @brief Retrieve the string value of the first leaf matching an XPath.
++ *
++ * This function searches for the first node matching the given XPath under the
++ * specified data tree node. If found and is a leaf or leaf-list, its string
++ * value is returned via the output parameter.
++ *
++ * @param[in]  node   Root node to search from (must not be NULL).
++ * @param[in]  xpath  XPath expression to locate the leaf.
++ * @param[out] value  Address of a pointer to receive the string value.
++ *
++ * @return 0 on success, -1 on error (not found, wrong type, or invalid args).
++ */
++int
++np2srv_mplane_ch_get_first_value_str(const struct lyd_node* node,
++                                     const char *xpath,
++                                     const char** value)
++{
++    if (!node || !xpath || !value)
++    {
++        ERR("Incorrect parameters. node %p, xpath %p, value %p",
++            node, xpath, value);
++        return -1;
++    }
++
++    // Search for the subset
++    struct ly_set *subset;
++    subset = lyd_find_path(node, xpath);
++    if (!subset || subset->number == 0)
++    {
++        ERR("Unable to get subset for xpath %s", xpath);
++        if (subset)
++        {
++            ly_set_free(subset);
++        }
++        return -1;
++    }
++
++    struct lyd_node_leaf_list *extract;
++    int ret = np2srv_mplane_get_first_node_list_from_node(subset, &extract);
++    if (ret != 0)
++    {
++        ERR("Unable to get lyd_node_leaf_list");
++        return -1;
++    }
++
++    if (!extract)
++    {
++        ERR("Unable to get first item of the subset on xpath %s", xpath);
++        ly_set_free(subset);
++        return -1;
++    }
++
++    *value = extract->value_str;
++    ly_set_free(subset);
++
++    return 0;
++}
++
++/**
++ * @brief Retrieve the uint16 value of the first leaf matching an XPath.
++ *
++ * This function searches for the first node matching the given XPath under the
++ * specified data tree node. If found and is a leaf or leaf-list, its uint16
++ * value is returned via the output parameter.
++ *
++ * @param[in]  node   Root node to search from (must not be NULL).
++ * @param[in]  xpath  XPath expression to locate the leaf.
++ * @param[out] value  Pointer to uint16_t to receive the value.
++ *
++ * @return 0 on success, -1 on error (not found, wrong type, or invalid args).
++ */
++int
++np2srv_mplane_ch_get_first_value_uint16(const struct lyd_node* node,
++                                        const char *xpath,
++                                        uint16_t* value)
++{
++    if (!node || !xpath || !value)
++    {
++        ERR("Incorrect parameters. node %p, xpath %p, value %p",
++            node, xpath, value);
++        return -1;
++    }
++
++    // Search for the subset
++    struct ly_set *subset;
++    subset = lyd_find_path(node, xpath);
++    if (!subset || subset->number == 0)
++    {
++        ERR("Unable to get subset for xpath %s", xpath);
++        if (subset)
++        {
++            ly_set_free(subset);
++        }
++        return -1;
++    }
++
++
++    struct lyd_node_leaf_list *extract;
++    int ret = np2srv_mplane_get_first_node_list_from_node(subset, &extract);
++    if (ret != 0)
++    {
++        ERR("Unable to get lyd_node_leaf_list");
++        return -1;
++    }
++    if (!extract)
++    {
++        ERR("Unable to get first item of the subset on xpath %s", xpath);
++        ly_set_free(subset);
++        return -1;
++    }
++
++    *value = extract->value.uint16;
++    ly_set_free(subset);
++
++    return 0;
++}
++
++/**
++ * @brief Retrieve the uint8 value of the first leaf matching an XPath.
++ *
++ * This function searches for the first node matching the given XPath under the
++ * specified data tree node. If found and is a leaf or leaf-list, its uint8
++ * value is returned via the output parameter.
++ *
++ * @param[in]  node   Root node to search from (must not be NULL).
++ * @param[in]  xpath  XPath expression to locate the leaf.
++ * @param[out] value  Pointer to uint8_t to receive the value.
++ *
++ * @return 0 on success, -1 on error (not found, wrong type, or invalid args).
++ */
++int
++np2srv_mplane_ch_get_first_value_uint8(const struct lyd_node* node,
++                                       const char *xpath,
++                                       uint8_t* value)
++{
++    if (!node || !xpath || !value)
++    {
++        ERR("Incorrect parameters. node %p, xpath %p, value %p",
++            node, xpath, value);
++        return -1;
++    }
++
++    // Search for the subset
++    struct ly_set *subset;
++    subset = lyd_find_path(node, xpath);
++    if (!subset || subset->number == 0)
++    {
++        ERR("Unable to get subset for xpath %s", xpath);
++        if (subset)
++        {
++            ly_set_free(subset);
++        }
++        return -1;
++    }
++
++    struct lyd_node_leaf_list *extract;
++    int ret = np2srv_mplane_get_first_node_list_from_node(subset, &extract);
++    if (ret != 0)
++    {
++        ERR("Unable to get lyd_node_leaf_list");
++        return -1;
++    }
++    if (!extract)
++    {
++        ERR("Unable to get first item of the subset on xpath %s", xpath);
++        ly_set_free(subset);
++        return -1;
++    }
++
++    *value = extract->value.uint8;
++    ly_set_free(subset);
++
++    return 0;
++}
++
++typedef struct {
++    char ip[INET6_ADDRSTRLEN + 1]; // For /0
++    uint8_t dscp;
++} mplane_ip_dscp_entry_t;
++
++typedef struct {
++    int16_t ip_dscp_entries_number; // Number of valid entries
++    mplane_ip_dscp_entry_t entries[MAX_CLIENT_COUNT];
++} mplane_ip_dscp_list_t;
++
++/**
++ * @brief Retrieve the list of local interface IP addresses and their associated DSCP values.
++ *
++ * This function queries sysrepo for all configured network interfaces, extracts each interface's
++ * local IP address (IPv4 or IPv6) and its corresponding DSCP (Differentiated Services Code Point)
++ * marking, and populates the provided @p ip_dscp_list structure with the results.
++ *
++ * The function iterates through all interfaces found at the path "/ietf-interfaces:interfaces/ietf-interfaces:interface",
++ * checks for both IPv6 and IPv4 addresses, and fetches the DSCP marking from the appropriate YANG node.
++ * Only interfaces with both a local address and a DSCP marking are included in the output list.
++ *
++ * @param[in]  session      Sysrepo session context used for data retrieval.
++ * @param[out] ip_dscp_list Pointer to a structure to be filled with IP/DSCP pairs.
++ *
++ * @retval 0               Success; @p ip_dscp_list is populated.
++ * @retval -1              Invalid arguments.
++ * @retval SR_ERR_INTERNAL Sysrepo or libyang error during data retrieval or parsing.
++ *
++ * @note The function clears @p ip_dscp_list before populating it.
++ *       The number of valid entries is stored in ip_dscp_list->ip_dscp_entries_number.
++ *       The function ensures all IP strings are null-terminated.
++ *       Only interfaces with both a local address and DSCP marking are included.
++ */
++int
++np2srv_m_mplane_get_dscp_local_address_list(
++                                    sr_session_ctx_t *session,
++                                    mplane_ip_dscp_list_t *ip_dscp_list)
++{
++    int ret = 0, count = 0;
++    struct lyd_node *ietf_interface_data = NULL, *ietf_interface_node = NULL;
++    struct ly_set *ietf_interface_set = NULL;
++    const char* interface_xpath = "/ietf-interfaces:interfaces/"
++                                  "ietf-interfaces:interface";
++
++    if (!session || !ip_dscp_list)
++    {
++        ERR("Invalid arguments, session %p, ip_dscp_list %p",
++            session,
++            ip_dscp_list);
++        return -1;
++    }
++
++    memset(ip_dscp_list, 0, sizeof(mplane_ip_dscp_list_t));
++
++    VRB("Get local address and dscp correspondence");
++    // Fetch all the ietf-interfaces configured in sysrepo
++    VRB("Fetch sysrepo data for path %s", interface_xpath);
++    ret = sr_get_data(session, interface_xpath, 0, np2srv.sr_timeout, 0,
++                      &ietf_interface_data);
++    if (ret != 0 || !ietf_interface_data)
++    {
++        ERR("Unable to get data from sysrepo (%s)", sr_strerror(ret));
++        return SR_ERR_INTERNAL;
++    }
++
++    char *xml_buf = NULL;
++    int rc = lyd_print_mem(&xml_buf, ietf_interface_data, LYD_XML, LYP_FORMAT | LYP_WD_ALL);
++    if (rc == 0 && xml_buf)
++    {
++        VRB("ietf-interface data:\n%s", xml_buf); // This will print the full XML tree
++        free(xml_buf);
++    }
++    else
++    {
++        ERR("Failed to serialize data tree to XML");
++        // We don't return as it is only the print which failed
++    }
++
++    // Data is giving the node of the top container, we need to get the set from
++    //  the xpath /ietf-interfaces:interfaces/ietf-interfaces:interface
++    ietf_interface_set = lyd_find_path(ietf_interface_data, interface_xpath);
++    if (!ietf_interface_set)
++    {
++        ERR("Unable to get ly_set from data provided by sysrepo");
++        lyd_free_withsiblings(ietf_interface_data);
++        return SR_ERR_INTERNAL;
++    }
++
++    // Go over all interface
++    for (unsigned int interface_idx = 0;
++         interface_idx < ietf_interface_set->number;
++         interface_idx++)
++    {
++        const char* mplane_marking_xpath = NULL;
++        ietf_interface_node = ietf_interface_set->set.d[interface_idx];
++        if (!ietf_interface_node)
++        {
++            ERR("ietf_interface_node is NULL");
++            continue;
++        }
++
++        // Get local-address which will be on the path ip:ipv4/ip:address/ip:ip
++        //  or ip:ipv6/ip:address/ip:ip
++        const char* ip6_path = "ietf-ip:ipv6/ietf-ip:address/ietf-ip:ip";
++        const char* ip;
++        ret = np2srv_mplane_ch_get_first_value_str(ietf_interface_node,
++                                                   ip6_path,
++                                                   &ip);
++        if (ret == 0)
++        {
++            mplane_marking_xpath =
++                                "ietf-ip:ipv6/o-ran-interfaces:m-plane-marking";
++        }
++        else
++        {
++            // ipv6 is not defined. Try ipv4
++            const char* ip4_path =  "ietf-ip:ipv4/ietf-ip:address/ietf-ip:ip";
++            ret = np2srv_mplane_ch_get_first_value_str(ietf_interface_node,
++                                                    ip4_path,
++                                                    &ip);
++            if (ret != 0)
++            {
++                // no local address is defined for this interface
++                continue;
++            }
++            mplane_marking_xpath =
++                                "ietf-ip:ipv4/o-ran-interfaces:m-plane-marking";
++        }
++        VRB("value of local-address for this interface: %s", ip);
++
++        // Now get the mplane-marking
++        uint8_t dscp;
++
++        ret = np2srv_mplane_ch_get_first_value_uint8(ietf_interface_node,
++                                                     mplane_marking_xpath,
++                                                    &dscp);
++        if (ret != 0)
++        {
++            WRN("dscp not defined for address %s", ip);
++            continue;
++        }
++
++        VRB("Got dscp %d, for local-address %s", dscp, ip);
++
++        // Fill the structure
++        ip_dscp_list->entries[count].dscp = dscp;
++        snprintf(ip_dscp_list->entries[count].ip,INET6_ADDRSTRLEN,"%s", ip);
++        ip_dscp_list->entries[count].ip[INET6_ADDRSTRLEN - 1] = '\0'; // Ensure null-termination
++        ip_dscp_list->ip_dscp_entries_number++;
++        count++;
++    }
++    VRB("Got %d local-addresses with dscp", count);
++    ly_set_free(ietf_interface_set);
++    lyd_free_withsiblings(ietf_interface_data);
++    return 0;
++}
++
++/**
++ * @brief Sysrepo callback for updating NETCONF call-home client configuration.
++ *
++ * This callback is invoked by sysrepo when the NETCONF client configuration
++ * changes. It retrieves the NETCONF client data tree, parses relevant
++ * parameters (such as endpoints, authentication methods, connection type,
++ * keepalive settings, etc.), and updates the libnetconf2 server accordingly.
++ *
++ * @param[in]  session       Sysrepo session context.
++ * @param[in]  module_name   Name of the YANG module (unused).
++ * @param[in]  xpath         XPath to the NETCONF client container.
++ * @param[in]  event         Sysrepo event type (unused).
++ * @param[in]  request_id    Sysrepo request ID (unused).
++ * @param[in]  private_data  User private data (unused).
++ *
++ * @return SR_ERR_OK (0) on success, SR_ERR_INTERNAL on error.
++ */
++int np2srv_mplane_ch_netconf_client_cb(sr_session_ctx_t *session,
++                                       const char *UNUSED(module_name),
++                                       const char *xpath,
++                                       sr_event_t UNUSED(event),
++                                       unsigned int UNUSED(request_id),
++                                       void *UNUSED(private_data))
++{
++    int ret = 0, auth = 0, conn_type = 0;
++    struct lyd_node *netconf_client_data, *netconf_client_node, *endpoint_node;
++    struct ly_set * netconf_client_set;
++    const char *client_name, *endpt_name;
++    const char *remote_address, *local_address;
++    const char *keystore_ref;
++    const char *conn_type_anchor_time;
++    uint16_t conn_type_period, conn_type_idle_timeout, local_port, remote_port;
++    uint16_t ka_idle_time, ka_max_probes, ka_probe_interval;
++    VRB("New data for netconf-client. Disable all call home thread");
++    // We call the function to pause all call home threads
++    ret = nc_mplane_pause_ch_threads();
++    if (ret != 0)
++    {
++        // We can continue, the only thing it will change is the deletion
++        //  operation won't really work as the call home thread  will continue
++        //  to run
++        ERR("Unable to pause call home threads. Continue anyway");
++    }
++
++    ret = nc_mplane_empty_ch_client_endpoints();
++    if (ret != 0)
++    {
++        // We can continue, the only issue it will be that extra node won't
++        //  be deleted
++        ERR("Unable to remove content of netconf-client into libnetconf2");
++    }
++
++    // Get all data.
++    ret = sr_get_data(session, xpath, 0, np2srv.sr_timeout, 0,
++                     &netconf_client_data);
++    if (ret != 0)
++    {
++        ERR("Unable to get data from sysrepo(%s).", sr_strerror(ret));
++        return SR_ERR_INTERNAL;
++    }
++
++    if (!netconf_client_data)
++    {
++        ERR("Data provided by sysrepo is not usable.");
++        return SR_ERR_INTERNAL;
++    }
++
++    char *xml_buf = NULL;
++    int rc = lyd_print_mem(&xml_buf, netconf_client_data, LYD_XML, LYP_FORMAT | LYP_WD_ALL);
++    if (rc == 0 && xml_buf)
++    {
++        VRB("netconf-client-data:\n%s", xml_buf); // This will print the full XML tree
++        free(xml_buf);
++    }
++    else
++    {
++        ERR("Failed to serialize data tree to XML");
++        // We don't return as it is only the print which failed
++    }
++    // Data is giving the node of the top container, we need to get the set from
++    //  the xpath /ietf-netconf-server:netconf-server/call-home/netconf-client
++    netconf_client_set = lyd_find_path(netconf_client_data, xpath);
++    if (!netconf_client_set)
++    {
++        ERR("Unable to get ly_set from data provided by sysrepo");
++        lyd_free_withsiblings(netconf_client_data);
++        return SR_ERR_INTERNAL;
++    }
++
++    mplane_ip_dscp_list_t dscp_list;
++    np2srv_m_mplane_get_dscp_local_address_list(session, &dscp_list);
++
++    // Going on all the data of the set and applying the changes
++    for (unsigned int index = 0; index < netconf_client_set->number; index++)
++    {
++        netconf_client_node = netconf_client_set->set.d[index];
++        if (!netconf_client_node)
++        {
++            ERR("netconf_client_node is NULL");
++            continue;
++        }
++
++        ret = np2srv_mplane_ch_get_first_value_str(netconf_client_node,
++                                                   "name",
++                                                   &client_name);
++        if (ret != 0)
++        {
++            ERR("Error while retrieving client name");
++            continue;
++        }
++
++        // For connection_type it's not a value of a leaf but the leaf itself
++        struct ly_set *conn_type_subset =
++                                    lyd_find_path(netconf_client_node,
++                                    "connection-type");
++        if (!conn_type_subset || conn_type_subset->number == 0)
++        {
++            ERR("Error while retrieving connection-type");
++            continue;
++        }
++        struct lyd_node* conn_type_node = conn_type_subset->set.d[0]->child;
++        if (!conn_type_node)
++        {
++            ERR("No connection type");
++            continue;
++        }
++        if (!strcmp(conn_type_node->schema->name, "persistent"))
++        {
++            conn_type = NC_CH_PERSIST;
++        }
++        else if (!strcmp(conn_type_node->schema->name, "periodic"))
++        {
++            conn_type = NC_CH_PERIOD;
++
++            // In that case we need to get the period, anchor-time,
++            //   and idle-timeout
++
++            const char* conn_type_period_xpath =
++                                            "connection-type/periodic/period";
++            ret = np2srv_mplane_ch_get_first_value_uint16(
++                                                        netconf_client_node,
++                                                        conn_type_period_xpath,
++                                                        &conn_type_period);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving connection type period");
++                ly_set_free(conn_type_subset);
++                continue;
++            }
++
++            const char* conn_type_anchor_time_xpath =
++                                        "connection-type/periodic/anchor-time";
++            ret = np2srv_mplane_ch_get_first_value_str(
++                                                    netconf_client_node,
++                                                    conn_type_anchor_time_xpath,
++                                                    &conn_type_anchor_time);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving connection type anchor time");
++                ly_set_free(conn_type_subset);
++                continue;
++            }
++
++            const char* conn_type_idle_timeout_xpath =
++                                        "connection-type/periodic/idle-timeout";
++            ret = np2srv_mplane_ch_get_first_value_uint16(
++                                                    netconf_client_node,
++                                                    conn_type_idle_timeout_xpath,
++                                                    &conn_type_idle_timeout);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving connection type idle-timeout");
++                ly_set_free(conn_type_subset);
++                continue;
++            }
++        }
++        else
++        {
++            ERR("Unsupported connection type %s", conn_type_node->schema->name);
++            ly_set_free(conn_type_subset);
++            continue;
++        }
++        ly_set_free(conn_type_subset);
++
++        // We need to create the netconf-client right now. Because we will
++        //  go over all endpoints after that
++
++
++        ret = nc_mplane_server_ch_add_client_if_not_exist(client_name);
++        if (ret != 0)
++        {
++            ERR("Unable to create client on libnetconf2");
++            continue;
++        }
++
++        // As we create the netconf-client we can set up the connection type
++        ret = nc_server_ch_client_set_conn_type(client_name, conn_type);
++        if (ret != 0)
++        {
++            ERR("Unable to set connection type");
++            continue;
++        }
++
++        if (conn_type == NC_CH_PERIOD)
++        {
++            // In that case we need to fill data for period, anchor-time, and
++            //  idle-timeout
++            ret = nc_server_ch_client_periodic_set_period(client_name,
++                                                          conn_type_period);
++            if (ret != 0)
++            {
++                ERR("Unable to set connection type period");
++                continue;
++            }
++            ret = nc_server_ch_client_periodic_set_anchor_time(
++                                    client_name,
++                                    nc_datetime2time(conn_type_anchor_time));
++            if (ret != 0)
++            {
++                ERR("Unable to set connection type anchor-time");
++                continue;
++            }
++            ret = nc_server_ch_client_periodic_set_idle_timeout(
++                                                        client_name,
++                                                        conn_type_idle_timeout);
++            if (ret != 0)
++            {
++                ERR("Unable to set connection type idle-timeout");
++                continue;
++            }
++        }
++
++        // Go over all endpoints
++        struct ly_set *endpoints_set = lyd_find_path(netconf_client_node,
++                                                     "endpoints/endpoint");
++        if (!endpoints_set)
++        {
++            ERR("set of endpoints is NULL");
++            continue;
++        }
++
++        for (uint16_t endpt_idx = 0;
++             endpt_idx < endpoints_set->number;
++             endpt_idx++)
++        {
++            endpoint_node = endpoints_set->set.d[endpt_idx];
++            if (!endpoint_node)
++            {
++                ERR("endpoint node is NULL");
++            }
++
++            // Fetch all the data
++            ret = np2srv_mplane_ch_get_first_value_str(endpoint_node,
++                                                       "name",
++                                                       &endpt_name);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving endpt_name");
++                continue;
++            }
++
++            ret = np2srv_mplane_ch_get_first_value_str(
++                    endpoint_node,
++                    "ssh/tcp-client-parameters/remote-address",
++                    &remote_address);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving remote-address");
++                continue;
++            }
++
++            ret = np2srv_mplane_ch_get_first_value_uint16(
++                    endpoint_node,
++                    "ssh/tcp-client-parameters/remote-port",
++                    &remote_port);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving remote-port");
++                continue;
++            }
++
++            ret = np2srv_mplane_ch_get_first_value_str(
++                    endpoint_node,
++                    "ssh/tcp-client-parameters/local-address",
++                    &local_address);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving local-address");
++                continue;
++            }
++
++            ret = np2srv_mplane_ch_get_first_value_uint16(
++                    endpoint_node,
++                    "ssh/tcp-client-parameters/local-port",
++                    &local_port);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving local-port");
++                continue;
++            }
++
++            const char *keystore_xpath =
++                        "ssh/ssh-server-parameters/"
++                        "server-identity/host-key/public-key/keystore-reference";
++
++            ret = np2srv_mplane_ch_get_first_value_str(endpoint_node,
++                                                       keystore_xpath,
++                                                       &keystore_ref);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving keystore-reference");
++                continue;
++            }
++
++            // For the authmethod we need to get the node itself
++            const char* auth_methods_xpath =
++                        "ssh/ssh-server-parameters/client-authentication"
++                        "/supported-authentication-methods";
++
++            struct ly_set *auth_subset = lyd_find_path(endpoint_node,
++                                                       auth_methods_xpath);
++            if (!auth_subset || auth_subset->number == 0)
++            {
++                ERR("Error while retrieving supported-authentication-methods");
++                if (auth_subset)
++                {
++                    ly_set_free(auth_subset);
++                }
++                continue;
++            }
++
++            for (unsigned int index = 0; index < auth_subset->number; index++)
++            {
++                struct lyd_node *auth_method_node = auth_subset->set.d[index];
++                if (!auth_method_node)
++                {
++                    ERR("auth_method_node is nullptr");
++                    continue;
++                }
++
++                // The node is still <supported-authentication-methods, but we want
++                //  to go through the children
++                struct lyd_node *method_node = auth_method_node->child;
++
++                for( ;method_node;method_node = method_node->next)
++                {
++                    if (!(method_node->schema))
++                    {
++                        ERR("method_node or method_node->schema is null");
++                        continue;
++                    }
++                    if (!strcmp(method_node->schema->name, "publickey"))
++                    {
++                        auth |= NC_SSH_AUTH_PUBLICKEY;
++                    }
++                    // Typo passSword is coming from yang module
++                    else if (!strcmp(method_node->schema->name, "passsword"))
++                    {
++                        auth |= NC_SSH_AUTH_PASSWORD;
++                    }
++                    else if (!strcmp(method_node->schema->name, "other"))
++                    {
++                        if (method_node->schema->nodetype != LYS_LEAF &&
++                            method_node->schema->nodetype != LYS_LEAFLIST)
++                        {
++                            ERR("Node is neither LYS_LEAF nor LYS_LEAFLIST");
++                            continue;
++                        }
++
++                        struct lyd_node_leaf_list *auth_leaf =
++                                        (struct lyd_node_leaf_list *) method_node;
++                        if (!strcmp(auth_leaf->value_str, "interactive"))
++                        {
++                            auth |= NC_SSH_AUTH_INTERACTIVE;
++                        } else {
++                            WRN("SSH authentication \"%s\" not supported.",
++                                auth_leaf->value_str);
++                        }
++                    }
++                    else
++                    {
++                        WRN("SSH authentication \"%s\" not supported.",
++                            method_node->schema->name);
++                    }
++                }
++            }
++            ly_set_free(auth_subset);
++
++
++            const char* ka_idle_time_xpath =
++                            "ssh/tcp-client-parameters/keepalives/idle-time";
++            ret = np2srv_mplane_ch_get_first_value_uint16(endpoint_node,
++                                                          ka_idle_time_xpath,
++                                                          &ka_idle_time);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving keepalives idle-time");
++                continue;
++            }
++            const char* ka_max_probes_xpath =
++                                    "ssh/tcp-client-parameters"
++                                    "/keepalives/max-probes";
++            ret = np2srv_mplane_ch_get_first_value_uint16(endpoint_node,
++                                                          ka_max_probes_xpath,
++                                                          &ka_max_probes);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving keepalives max_probes");
++                continue;
++            }
++            const char* ka_probe_interval_xpath =
++                                                "ssh/tcp-client-parameters"
++                                                "/keepalives/probe-interval";
++            ret = np2srv_mplane_ch_get_first_value_uint16(
++                                                        endpoint_node,
++                                                        ka_probe_interval_xpath,
++                                                        &ka_probe_interval);
++            if (ret != 0)
++            {
++                ERR("Error while retrieving keepalives probe interval");
++                continue;
++            }
++
++            // Now all the data for the endpoint is fetch. We can set it to LN2
++
++            // Currently we support only SSH. The flag NC_TI_LIBSSH is coming from
++            //  np2srv_ch_client_endpt_ssh_cb()
++            ret = nc_server_ch_client_add_endpt(client_name,
++                                                endpt_name,
++                                                NC_TI_LIBSSH);
++            if (ret != 0)
++            {
++                ERR("Unable to add endpt on libnetconf2");
++                continue;
++            }
++
++            // Turn off all auth methods by default, we will update it later
++            ret = nc_server_ssh_ch_client_endpt_set_auth_methods(client_name,
++                                                                 endpt_name,
++                                                                 0);
++            if (ret != 0)
++            {
++                ERR("Unable to set auth method");
++                continue;
++            }
++
++            ret = nc_server_ch_client_endpt_set_address(client_name,
++                                                        endpt_name,
++                                                        remote_address);
++            if (ret != 0)
++            {
++                ERR("Unable to set remote address");
++                continue;
++            }
++
++            ret = nc_server_ch_client_endpt_set_port(client_name,
++                                                     endpt_name,
++                                                     remote_port);
++            if (ret != 0)
++            {
++                ERR("Unable to set remote port");
++                continue;
++            }
++
++            ret = nc_server_ch_client_endpt_set_local_address(client_name,
++                                                             endpt_name,
++                                                             local_address);
++            if (ret != 0)
++            {
++                ERR("Unable to set local address");
++                continue;
++            }
++
++            ret = nc_server_ch_client_endpt_set_local_port(client_name,
++                                                           endpt_name,
++                                                           local_port);
++            if (ret != 0)
++            {
++                ERR("Unable to set local port");
++                continue;
++            }
++
++            // The -1 is used to update the last hostkey in the list
++            ret = nc_server_ssh_ch_client_endpt_add_hostkey(client_name,
++                                                            endpt_name,
++                                                            keystore_ref,
++                                                            -1);
++            if (ret != 0)
++            {
++                ERR("Unable to set hostkey");
++                continue;
++            }
++
++            ret = nc_server_ssh_ch_client_endpt_set_auth_methods(client_name,
++                                                                 endpt_name,
++                                                                 auth);
++            if (ret != 0)
++            {
++                ERR("Unable to set authentication methods");
++                continue;
++            }
++
++            // Enable keepalives
++            ret = nc_server_ch_client_endpt_enable_keepalives(client_name,
++                                                              endpt_name,
++                                                              1);
++            if (ret != 0)
++            {
++                ERR("Unable to enable keepalives");
++                continue;
++            }
++
++            ret = nc_server_ch_client_endpt_set_keepalives(
++                                                    client_name,
++                                                        endpt_name,
++                                                        ka_idle_time,
++                                                        ka_max_probes,
++                                                        ka_probe_interval);
++            if (ret != 0)
++            {
++                ERR("Unable to set keepalives parameters");
++                continue;
++            }
++
++            // Now we want to add the dscp if needed
++            for (uint16_t ip_idx = 0;
++                 ip_idx < dscp_list.ip_dscp_entries_number;
++                 ip_idx++)
++            {
++                if (!strcmp(dscp_list.entries[ip_idx].ip, local_address))
++                {
++                    // Found dscp for this endpoint
++                    ret = nc_mplane_server_ch_client_endpt_set_dscp(
++                                                client_name,
++                                                endpt_name,
++                                                dscp_list.entries[ip_idx].dscp);
++                    if (ret != 0)
++                    {
++                        ERR("failed to update the dscp");
++                    }
++                    break;
++                }
++            }
++            // Go to next endpoint
++        } // Loop through all endpoints
++
++        ly_set_free(endpoints_set);
++
++        // Now we can resume or create call home thread
++        ret = nc_mplane_ch_client_resume_or_dispatch(client_name,
++                                                     np2srv_new_session_cb);
++        if (ret != 0)
++        {
++            ERR("Unable to resume or dispatch call home thread for client %s",
++                client_name);
++            continue;
++        }
++    } // Loop through netconf-clients
++
++    lyd_free_withsiblings(netconf_client_data);
++    ly_set_free(netconf_client_set);
++
++    return SR_ERR_OK;
++}
++
+ /* /ietf-netconf-server:netconf-server/call-home/netconf-client */
+ int
+ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
+@@ -339,6 +1291,170 @@ np2srv_ch_client_cb(sr_session_ctx_t *session, const char *UNUSED(module_name),
+     return SR_ERR_OK;
+ }
+ 
 +/* /if:interfaces/if:interface/ip:ipv4/o-ran-int:m-plane-marking */
 +/* /if:interfaces/if:interface/ip:ipv6/o-ran-int:m-plane-marking */
 +int
 +np2srv_m_plane_marking(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
 +        sr_event_t UNUSED(event), uint32_t UNUSED(request_id), void *UNUSED(private_data))
 +{
-+    #define MAX_NAME_LEN 255
-+    #define MAX_CLIENT_COUNT 50
-+    #define MAX_XPATH_LEN 1024
 +    char *client_addr[MAX_CLIENT_COUNT];
 +    uint8_t client_dscp[MAX_CLIENT_COUNT];
 +    uint8_t client_count = 0;
@@ -1135,10 +2227,11 @@ index 4645f84..902b15c 100644
  /* /ietf-netconf-server:netconf-server/call-home/netconf-client/endpoints/endpoint/ * /tcp-client-parameters */
  int
  np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUSED(module_name), const char *xpath,
-@@ -382,6 +549,30 @@ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUS
+@@ -382,7 +1498,31 @@ np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *UNUS
                      return SR_ERR_INTERNAL;
                  }
              }
+-        } else if (!strcmp(node->schema->name, "keepalives")) {
 +        } else if (!strcmp(node->schema->name, "local-address")) {
 +            if ((op == SR_OP_CREATED) || (op == SR_OP_MODIFIED)) {
 +                if (nc_server_ch_client_endpt_set_local_address(client_name, endpt_name, ((struct lyd_node_leaf_list *)node)->value_str)) {
@@ -1163,17 +2256,122 @@ index 4645f84..902b15c 100644
 +                    return SR_ERR_INTERNAL;
 +                }
 +            }
-         } else if (!strcmp(node->schema->name, "keepalives")) {
++    	} else if (!strcmp(node->schema->name, "keepalives")) {
              if (op == SR_OP_CREATED) {
                  rc = nc_server_ch_client_endpt_enable_keepalives(client_name, endpt_name, 1);
+             } else if (op == SR_OP_DELETED) {
 diff --git a/src/netconf_server.h b/src/netconf_server.h
-index cd56bd4..f6218b9 100644
+index cd56bd4..bd72820 100644
 --- a/src/netconf_server.h
 +++ b/src/netconf_server.h
-@@ -28,6 +28,14 @@ int np2srv_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_nam
+@@ -16,6 +16,8 @@
+ #define NP2SRV_NETCONF_SERVER_H_
+ 
+ #include <sysrepo.h>
++#include <libyang/libyang.h>
++#include <libyang/tree_data.h>
+ 
+ int np2srv_sr_get_privkey(const struct lyd_node *asym_key, char **privkey_data, NC_SSH_KEY_TYPE *privkey_type);
+ 
+@@ -28,6 +30,109 @@ int np2srv_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_nam
  int np2srv_ch_client_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
          uint32_t request_id, void *private_data);
-
+ 
++/**
++ * @brief Retrieve the first leaf or leaf-list node from a ly_set.
++ *
++ * This function extracts the first node from the provided ly_set and, if it is
++ * of type LYS_LEAF or LYS_LEAFLIST, assigns it to the output parameter as a
++ * struct lyd_node_leaf_list pointer.
++ *
++ * @param[in]  set        Pointer to the ly_set to search (must not be NULL).
++ * @param[out] leaf_list  Address of a pointer to receive the first leaf or
++ *                        leaf-list node (set to NULL on error).
++ *
++ * @return 0 on success, -1 on error (invalid arguments or node type mismatch).
++ */
++int np2srv_mplane_get_first_node_list_from_node(
++                                        const struct ly_set* set,
++                                        struct lyd_node_leaf_list** leaf_list);
++
++/**
++ * @brief Retrieve the string value of the first leaf matching an XPath.
++ *
++ * This function searches for the first node matching the given XPath under the
++ * specified data tree node. If found and is a leaf or leaf-list, its string
++ * value is returned via the output parameter.
++ *
++ * @param[in]  node   Root node to search from (must not be NULL).
++ * @param[in]  xpath  XPath expression to locate the leaf.
++ * @param[out] value  Address of a pointer to receive the string value.
++ *
++ * @return 0 on success, -1 on error (not found, wrong type, or invalid args).
++ */
++int
++np2srv_mplane_ch_get_first_value_str(const struct lyd_node* node,
++                                     const char *xpath,
++                                     const char** value);
++
++/**
++ * @brief Retrieve the uint16 value of the first leaf matching an XPath.
++ *
++ * This function searches for the first node matching the given XPath under the
++ * specified data tree node. If found and is a leaf or leaf-list, its uint16
++ * value is returned via the output parameter.
++ *
++ * @param[in]  node   Root node to search from (must not be NULL).
++ * @param[in]  xpath  XPath expression to locate the leaf.
++ * @param[out] value  Pointer to uint16_t to receive the value.
++ *
++ * @return 0 on success, -1 on error (not found, wrong type, or invalid args).
++ */
++int
++np2srv_mplane_ch_get_first_value_uint16(const struct lyd_node* node,
++                                        const char *xpath,
++                                        uint16_t* value);
++
++/**
++ * @brief Retrieve the uint8 value of the first leaf matching an XPath.
++ *
++ * This function searches for the first node matching the given XPath under the
++ * specified data tree node. If found and is a leaf or leaf-list, its uint8
++ * value is returned via the output parameter.
++ *
++ * @param[in]  node   Root node to search from (must not be NULL).
++ * @param[in]  xpath  XPath expression to locate the leaf.
++ * @param[out] value  Pointer to uint8_t to receive the value.
++ *
++ * @return 0 on success, -1 on error (not found, wrong type, or invalid args).
++ */
++int
++np2srv_mplane_ch_get_first_value_uint8(const struct lyd_node* node,
++                                       const char *xpath,
++                                       uint8_t* value);
++
++/**
++ * @brief Sysrepo callback for updating NETCONF call-home client configuration.
++ *
++ * This callback is invoked by sysrepo when the NETCONF client configuration
++ * changes. It retrieves the NETCONF client data tree, parses relevant
++ * parameters (such as endpoints, authentication methods, connection type,
++ * keepalive settings, etc.), and updates the libnetconf2 server accordingly.
++ *
++ * @param[in]  session       Sysrepo session context.
++ * @param[in]  module_name   Name of the YANG module (unused).
++ * @param[in]  xpath         XPath to the NETCONF client container.
++ * @param[in]  event         Sysrepo event type (unused).
++ * @param[in]  request_id    Sysrepo request ID (unused).
++ * @param[in]  private_data  User private data (unused).
++ *
++ * @return SR_ERR_OK (0) on success, SR_ERR_INTERNAL on error.
++ */
++int np2srv_mplane_ch_netconf_client_cb(sr_session_ctx_t *session,
++                                       const char *module_name,
++                                       const char *xpath,
++                                       sr_event_t event,
++                                       unsigned int request_id,
++                                       void *private_data);
++
 +int np2srv_re_call_home_no_ssh_timer(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
 +        uint32_t request_id, void *private_data);
 +
@@ -1184,13 +2382,38 @@ index cd56bd4..f6218b9 100644
 +
  int np2srv_ch_client_endpt_tcp_params_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath,
          uint32_t request_id, sr_event_t event, void *private_data);
-
-@@ -37,4 +45,7 @@ int np2srv_ch_connection_type_cb(sr_session_ctx_t *session, const char *module_n
+ 
+@@ -37,4 +142,32 @@ int np2srv_ch_connection_type_cb(sr_session_ctx_t *session, const char *module_n
  int np2srv_ch_reconnect_strategy_cb(sr_session_ctx_t *session, const char *module_name, const char *xpath,
          uint32_t request_id, sr_event_t event, void *private_data);
-
+ 
 +int np2srv_m_plane_marking(sr_session_ctx_t *session, const char *module_name, const char *xpath, sr_event_t event,
 +        uint32_t request_id, void *private_data);
++
++/**
++ * @brief Retrieve the list of local interface IP addresses and their associated DSCP values.
++ *
++ * This function queries sysrepo for all configured network interfaces, extracts each interface's
++ * local IP address (IPv4 or IPv6) and its corresponding DSCP (Differentiated Services Code Point)
++ * marking, and populates the provided @p ip_dscp_list structure with the results.
++ *
++ * The function iterates through all interfaces found at the path "/ietf-interfaces:interfaces/ietf-interfaces:interface",
++ * checks for both IPv6 and IPv4 addresses, and fetches the DSCP marking from the appropriate YANG node.
++ * Only interfaces with both a local address and a DSCP marking are included in the output list.
++ *
++ * @param[in]  session      Sysrepo session context used for data retrieval.
++ * @param[out] ip_dscp_list Pointer to a structure to be filled with IP/DSCP pairs.
++ *
++ * @retval 0               Success; @p ip_dscp_list is populated.
++ * @retval -1              Invalid arguments.
++ * @retval SR_ERR_INTERNAL Sysrepo or libyang error during data retrieval or parsing.
++ *
++ * @note The function clears @p ip_dscp_list before populating it.
++ *       The number of valid entries is stored in ip_dscp_list->ip_dscp_entries_number.
++ *       The function ensures all IP strings are null-terminated.
++ *       Only interfaces with both a local address and DSCP marking are included.
++ */
++int np2srv_m_mplane_get_dscp_local_address_list(sr_session_ctx_t *session);
 +
  #endif /* NP2SRV_NETCONF_SERVER_H_ */
 diff --git a/src/netconf_server_ssh.c b/src/netconf_server_ssh.c
@@ -1199,7 +2422,7 @@ index 1cfd3fa..4451da3 100644
 +++ b/src/netconf_server_ssh.c
 @@ -98,7 +98,7 @@ np2srv_pubkey_auth_cb(const struct nc_session *session, ssh_key key, void *UNUSE
      }
-
+ 
      /* check any authorized keys */
 -    r = asprintf(&line, NP2SRV_SSH_AUTHORIZED_KEYS_PATTERN, NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
 +    r = asprintf(&line, "/etc/mplane/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir);
@@ -1208,13 +2431,13 @@ index 1cfd3fa..4451da3 100644
          line = NULL;
 @@ -426,7 +426,7 @@ np2srv_endpt_ssh_auth_users_oper_cb(sr_session_ctx_t *UNUSED(session), const cha
          lyd_new_leaf(user, NULL, "name", pwd->pw_name);
-
+ 
          /* check any authorized keys */
 -        if (asprintf(&path, NP2SRV_SSH_AUTHORIZED_KEYS_PATTERN, NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir) == -1) {
 +        if (asprintf(&path, "/etc/mplane/.ssh/authorized_keys", NP2SRV_SSH_AUTHORIZED_KEYS_ARG_IS_USERNAME ? pwd->pw_name : pwd->pw_dir) == -1) {
              EMEM;
              goto cleanup;
          }
---
-2.43.0
+-- 
+2.17.1
 
