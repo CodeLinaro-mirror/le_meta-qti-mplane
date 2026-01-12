@@ -1,3 +1,6 @@
+This patch file is from Qualcomm Innovation Center, Inc. and is provided under the following license:
+Copyright (c) 2025 Qualcomm Innovation Center, Inc.
+SPDX-License-Identifier: BSD-3-Clause-Clear
 From daeb0f8e8020f0472adcb78681eac5c353115b0d Mon Sep 17 00:00:00 2001
 From: Rishabh Kothari <rishkoth@qti.qualcomm.com>
 Date: Mon, 5 Jan 2026 08:07:02 +0100
