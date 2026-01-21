@@ -15,6 +15,9 @@ S = "${WORKDIR}/git"
 
 inherit cmake
 
+DEPENDS += "mplane-common"
+EXTRA_OECMAKE += "-DCOMMON_INCLUDE_DIR=${STAGING_INCDIR}/mplanecommon"
+
 do_install_append(){
         install -d ${D}/usr/share/cmake/Modules/
         install -m 0644 ${S}/FindLibNETCONF2.cmake ${D}/usr/share/cmake/Modules/FindLibNETCONF2.cmake
