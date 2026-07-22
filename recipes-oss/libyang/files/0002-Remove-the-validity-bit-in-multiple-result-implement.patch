@@ -4,23 +4,19 @@ under the following license:
 Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
 SPDX-License-Identifier: BSD-3-Clause-Clear
 
-From 6a5c580c82dc969c3d02eee264786ce1c0b63a88 Mon Sep 17 00:00:00 2001
-From: Sanjeev Sharma <sansha@qti.qualcomm.com>
-Date: Tue, 7 Jul 2026 11:52:07 +0530
+From e6d205ce52dab9117d5da2e8a1c73fd3908d3556 Mon Sep 17 00:00:00 2001
+From: Sanjeev Sharma <quic_sansha@quicinc.com>
+Date: Thu, 11 Sep 2025 09:28:51 +0530
 Subject: [PATCH 2/2] Remove the validity bit in multiple result implementation
 
-Add LYD_OPT_NO_NP_INJECT
-
 Change log level of LYE_MISSELEM ERROR to WARNING
-
 Log leafref errors as warning
 
-Signed-off-by: Sanjeev Sharma <sansha@qti.qualcomm.com>
+Signed-off-by: Sanjeev Sharma <quic_sansha@quicinc.com>
 ---
- src/log.c       |  6 ++++++
- src/tree_data.c | 12 +++++++++---
- src/tree_data.h |  3 +++
- 3 files changed, 18 insertions(+), 3 deletions(-)
+ src/log.c       | 6 ++++++
+ src/tree_data.c | 2 --
+ 2 files changed, 6 insertions(+), 2 deletions(-)
 
 diff --git a/src/log.c b/src/log.c
 index 050bc3bc3..4086d84c8 100644
@@ -40,18 +36,10 @@ index 050bc3bc3..4086d84c8 100644
          log_vprintf(ctx, LY_LLERR, LY_EVALID, ecode2vecode[ecode], path, ly_errs[ecode], ap);
          break;
 diff --git a/src/tree_data.c b/src/tree_data.c
-index 14dd83761..153d2ead2 100644
+index 14dd83761..3df9c6ccb 100644
 --- a/src/tree_data.c
 +++ b/src/tree_data.c
-@@ -225,15 +225,13 @@ lyd_list_equal(struct lyd_node *node1, struct lyd_node *node2, int with_defaults
-                 } else if (elem2->schema->nodetype & (LYS_LEAFLIST | LYS_LEAF)) {
-                     if (!lyd_leaf_val_equal(elem1, elem2, diff_ctx) && (!with_defaults || (elem1->dflt == elem2->dflt))) {
-                         if(diff == NULL || size == NULL || index == NULL ) {
--                            LOGERR(ctx, LY_EINVAL, "%s: There is no value for diff, size and index in case of multiple result", __func__);
-+                            LOGDBG(LY_LDGDIFF, "%s: There is no value for diff, size and index in case of multiple result", __func__);
-                             break;
-                         }
-                         if (lyd_difflist_add(diff, size, (*index)++, LYD_DIFF_CHANGED, elem1, elem2)) {
+@@ -232,8 +232,6 @@ lyd_list_equal(struct lyd_node *node1, struct lyd_node *node2, int with_defaults
                              LOGERR(ctx, LY_EINVAL, "%s: failed to add the diff leaf in case of multiple result", __func__);
                              return -1;
                          }
@@ -60,42 +48,6 @@ index 14dd83761..153d2ead2 100644
                      }
                  } else if (elem2->schema->nodetype & LYS_ANYDATA) {
                      if (!lyd_anydata_equal(elem1, elem2)) {
-@@ -768,6 +766,10 @@ lyd_check_mandatory_subtree(struct lyd_node *tree, struct lyd_node *subtree, str
-     case LYS_CONTAINER:
-         if (present->number || !((struct lys_node_container *)schema)->presence) {
-             /* if we have existing or non-presence container, go recursively */
-+            if (!present->number && (options & LYD_OPT_NO_NP_INJECT)) {
-+                /* absent NP container with injection suppressed — skip mandatory checks */
-+                break;
-+            }
-             LY_TREE_FOR(schema->child, siter) {
-                 if (lyd_check_mandatory_subtree(tree, present->number ? present->set.d[0] : NULL,
-                                                 present->number ? present->set.d[0] : last_parent,
-@@ -7777,6 +7779,10 @@ lyd_wd_add_subtree(struct lyd_node **root, struct lyd_node *last_parent, struct
-                 /* stop recursion */
-                 break;
-             }
-+            if (options & LYD_OPT_NO_NP_INJECT) {
-+                /* caller requested no auto-creation of absent NP containers */
-+                break;
-+            }
-             /* always create empty NP container even if there is no default node,
-              * because accroding to RFC, the empty NP container is always part of
-              * accessible tree (e.g. for evaluating when and must conditions) */
-diff --git a/src/tree_data.h b/src/tree_data.h
-index 23c0f492e..c3ade6644 100644
---- a/src/tree_data.h
-+++ b/src/tree_data.h
-@@ -537,6 +537,9 @@ char *lyd_path(const struct lyd_node *node);
- #define LYD_OPT_VAL_DIFF 0x40000 /**< Flag only for validation, store all the data node changes performed by the validation
-                                       in a diff structure. */
- #define LYD_OPT_LYB_MOD_UPDATE 0x80000 /**< Allow to parse data using an updated revision of a module, relevant only for LYB format. */
-+#define LYD_OPT_NO_NP_INJECT 0x100000  /**< Do not auto-create NP (non-presence) containers unless explicitly added by
-+                                             the caller. NP containers are only auto-created for #LYD_OPT_DATA and
-+                                             #LYD_OPT_CONFIG; this flag suppresses that behaviour for those two modes. */
- #define LYD_OPT_DATA_TEMPLATE 0x1000000 /**< Data represents YANG data template. */
- #define LYD_OPT_MULTI_ERRORS  0x2000000 /**< Report all validation errors instead of the first one.
-                                              Applicable only in combination with #LYD_OPT_DATA and #LYD_OPT_CONFIG flags.
 -- 
 2.34.1
 
