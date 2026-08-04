@@ -1,18 +1,19 @@
-This patch file is from Qualcomm Innovation Center, Inc. and is provided
-under the following license:
+Changes from Qualcomm Technologies, Inc. are provided under the following license:
 
-Copyright (c) 2024 Qualcomm Innovation Center, Inc. All rights reserved.
+Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
+All Rights Reserved.
+Confidential and Proprietary - Qualcomm Technologies, Inc.
 SPDX-License-Identifier: BSD-3-Clause-Clear
 
 From e6d205ce52dab9117d5da2e8a1c73fd3908d3556 Mon Sep 17 00:00:00 2001
-From: Sanjeev Sharma <quic_sansha@quicinc.com>
+From: Sanjeev Sharma <sansha@qti.qualcomm.com>
 Date: Thu, 11 Sep 2025 09:28:51 +0530
 Subject: [PATCH 2/2] Remove the validity bit in multiple result implementation
 
 Change log level of LYE_MISSELEM ERROR to WARNING
 Log leafref errors as warning
 
-Signed-off-by: Sanjeev Sharma <quic_sansha@quicinc.com>
+Signed-off-by: Sanjeev Sharma <sansha@qti.qualcomm.com>
 ---
  src/log.c       | 6 ++++++
  src/tree_data.c | 2 --
