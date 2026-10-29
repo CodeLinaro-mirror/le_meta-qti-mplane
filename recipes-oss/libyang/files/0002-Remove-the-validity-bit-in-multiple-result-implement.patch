@@ -3,10 +3,12 @@ Changes from Qualcomm Technologies, Inc. are provided under the following licens
 Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 SPDX-License-Identifier: BSD-3-Clause-Clear
 
-From 6a5c580c82dc969c3d02eee264786ce1c0b63a88 Mon Sep 17 00:00:00 2001
+From 3d1dc7d45a2cffcd94fa0bd4287051d8d8943528 Mon Sep 17 00:00:00 2001
 From: Sanjeev Sharma <sansha@qti.qualcomm.com>
-Date: Thu, 11 Sep 2025 09:28:51 +0530
+Date: Thu, 29 Oct 2026 13:05:00 +0530
 Subject: [PATCH 2/2] Remove the validity bit in multiple result implementation
+
+Remove parent deleter backref in dup and dup_withsiblings
 
 Unified Data Tree : Add LYD_OPT_NO_NP_INJECT flag
 
@@ -16,10 +18,11 @@ Log leafref errors as warning
 
 Signed-off-by: Sanjeev Sharma <sansha@qti.qualcomm.com>
 ---
- src/log.c       |  6 ++++++
- src/tree_data.c | 12 +++++++++---
- src/tree_data.h |  3 +++
- 3 files changed, 18 insertions(+), 3 deletions(-)
+ src/log.c                  |  6 ++++++
+ src/tree_data.c            | 12 +++++++++---
+ src/tree_data.h            |  3 +++
+ swig/cpp/src/Tree_Data.cpp |  8 ++++++--
+ 4 files changed, 24 insertions(+), 5 deletions(-)
 
 diff --git a/src/log.c b/src/log.c
 index 050bc3bc3..4086d84c8 100644
@@ -95,6 +98,32 @@ index 23c0f492e..c3ade6644 100644
  #define LYD_OPT_DATA_TEMPLATE 0x1000000 /**< Data represents YANG data template. */
  #define LYD_OPT_MULTI_ERRORS  0x2000000 /**< Report all validation errors instead of the first one.
                                               Applicable only in combination with #LYD_OPT_DATA and #LYD_OPT_CONFIG flags.
+diff --git a/swig/cpp/src/Tree_Data.cpp b/swig/cpp/src/Tree_Data.cpp
+index 948e929f9..7803b9468 100644
+--- a/swig/cpp/src/Tree_Data.cpp
++++ b/swig/cpp/src/Tree_Data.cpp
+@@ -229,7 +229,9 @@ S_Data_Node Data_Node::dup(int recursive) {
+         return nullptr;
+     }
+ 
+-    S_Deleter new_deleter = std::make_shared<Deleter>(new_node, deleter);
++    /* lyd_dup allocates fully independent memory — nullptr parent so the source
++     * tree is not kept alive via the copy. */
++    S_Deleter new_deleter = std::make_shared<Deleter>(new_node);
+     return std::make_shared<Data_Node>(new_node, new_deleter);
+ }
+ S_Data_Node Data_Node::dup_withsiblings(int recursive) {
+@@ -240,7 +242,9 @@ S_Data_Node Data_Node::dup_withsiblings(int recursive) {
+         return nullptr;
+     }
+ 
+-    S_Deleter new_deleter = std::make_shared<Deleter>(new_node, deleter);
++    /* lyd_dup_withsiblings allocates fully independent memory — nullptr parent so
++     * the source tree is not kept alive via the copy. */
++    S_Deleter new_deleter = std::make_shared<Deleter>(new_node);
+     return std::make_shared<Data_Node>(new_node, new_deleter);
+ }
+ S_Data_Node Data_Node::dup_to_ctx(int recursive, S_Context context) {
 -- 
 2.34.1
 
